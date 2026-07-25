@@ -2,6 +2,7 @@
 
 ## 1.0.0
 
+- Branded the project as HeaderProof.
 - Added fast active scanner for URL lists.
 - Added strict certainty scoring and false-positive filtering.
 - Added live detailed alert boxes with evidence, missing proof, and validation steps.

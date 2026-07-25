@@ -1,6 +1,14 @@
-# Header Active Scan
+# HeaderProof
 
 Fast, low-noise active scanner for header-driven web security leads.
+
+```text
+    __  __               __          ____                   __
+   / / / /__  ____ _____/ /__  _____/ __ \________  ____  / /
+  / /_/ / _ \/ __ `/ __  / _ \/ ___/ /_/ / ___/ _ \/ __ \/ /
+ / __  /  __/ /_/ / /_/ /  __/ /  / ____/ /  /  __/ /_/ /_/
+/_/ /_/\___/\__,_/\__,_/\___/_/  /_/   /_/   \___/\____(_)
+```
 
 It scans a supplied URL list and live-alerts high-certainty findings for:
 
@@ -16,6 +24,12 @@ The scanner is intentionally conservative. Header-only observations are treated 
 
 ```bash
 python3 header_active_scan.py -i urls.txt --concurrency 16
+```
+
+Installed entrypoint:
+
+```bash
+headerproof -i urls.txt --concurrency 16
 ```
 
 Input can be a plain text URL list or httpx-style JSONL containing `url` fields.
@@ -41,7 +55,7 @@ Per-URL time budget is fixed at 9 seconds. The scanner uses fast internal defaul
 
 ## Output
 
-Each run creates an evidence directory under `evidence/header-scan-YYYYmmdd-HHMMSS/`.
+Each run creates an evidence directory under `evidence/headerproof-YYYYmmdd-HHMMSS/`.
 
 - `results.jsonl`: one full scan record per URL.
 - `signals.jsonl`: flattened findings only.

@@ -1,6 +1,6 @@
 # Security Policy
 
-Header Active Scan is intended for authorized security testing only.
+HeaderProof is intended for authorized security testing only.
 
 ## Reporting Issues
 

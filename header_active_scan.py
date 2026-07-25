@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Active header-focused scanner for authorized bug bounty workspaces.
+"""HeaderProof: active header-focused scanner for authorized bug bounty workspaces.
 
 The scanner intentionally stays on low-impact request methods by default:
 GET, HEAD-equivalent metadata from GET responses, and OPTIONS preflight. It
@@ -55,7 +55,15 @@ CACHEABLE_STATUSES = {200, 203, 204, 206, 300, 301, 302, 404, 410}
 SEVERITY_ORDER = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
 CONFIDENCE_ORDER = {"high": 3, "medium": 2, "low": 1}
 ALERT_LOCK = threading.Lock()
+PRODUCT_NAME = "HeaderProof"
 VERSION = "1.0.0"
+BANNER = r"""
+    __  __               __          ____                   __
+   / / / /__  ____ _____/ /__  _____/ __ \________  ____  / /
+  / /_/ / _ \/ __ `/ __  / _ \/ ___/ /_/ / ___/ _ \/ __ \/ /
+ / __  /  __/ /_/ / /_/ /  __/ /  / ____/ /  /  __/ /_/ /_/
+/_/ /_/\___/\__,_/\__,_/\___/_/  /_/   /_/   \___/\____(_)
+"""
 FP_CERTAINTY_DEFAULTS = {"strict": 70, "balanced": 55, "all": 0}
 PROFILE_DEFAULTS = {
     "fast": {
@@ -250,7 +258,7 @@ class HttpClient:
         timeout: float | None = None,
     ) -> HttpSnapshot:
         request_headers = {
-            "User-Agent": f"header-active-scan/{VERSION}",
+            "User-Agent": f"headerproof/{VERSION}",
             "Accept": "*/*",
             "Accept-Encoding": "identity",
             "Connection": "close",
@@ -737,9 +745,17 @@ def ui_kv(label: str, value: Any) -> str:
     return f"{label:<18} {value}"
 
 
+def emit_banner(args: argparse.Namespace) -> None:
+    color = terminal_color(sys.stderr.isatty() and not args.no_color, "info")
+    with ALERT_LOCK:
+        print(color + BANNER.rstrip() + reset_color(bool(color)), file=sys.stderr, flush=True)
+
+
 def emit_scan_start(input_path: Path, url_count: int, args: argparse.Namespace, out_dir: Path) -> None:
     color = terminal_color(sys.stderr.isatty() and not args.no_color, "info")
     lines = [
+        ui_kv("Tool", f"{PRODUCT_NAME} v{VERSION}"),
+        ui_kv("Focus", "CORS, CSRF, header injection, cache poisoning, content spoofing"),
         ui_kv("Input", input_path),
         ui_kv("URLs", url_count),
         ui_kv("Concurrency", args.concurrency),
@@ -749,7 +765,8 @@ def emit_scan_start(input_path: Path, url_count: int, args: argparse.Namespace, 
         ui_kv("Live alerts", "enabled; only high-certainty leads are printed"),
         ui_kv("Evidence", out_dir),
     ]
-    ui_box("HEADER ACTIVE SCAN", lines, color=color)
+    emit_banner(args)
+    ui_box("HEADERPROOF ACTIVE SCAN", lines, color=color)
 
 
 def emit_progress(
@@ -766,7 +783,7 @@ def emit_progress(
     filtered = sum(result.get("filtered_signals", 0) for result in results)
     percent = (completed / total) * 100 if total else 100
     line = (
-        f"[header-scan] {completed}/{total} ({percent:5.1f}%) "
+        f"[headerproof] {completed}/{total} ({percent:5.1f}%) "
         f"rate={rate:.1f}/s eta={format_duration(remaining)} "
         f"timeouts={timed_out} alerts={total_signals} filtered={filtered}"
     )
@@ -1491,7 +1508,7 @@ def write_outputs(results: list[dict[str, Any]], out_dir: Path) -> None:
     atomic_write_text(out_dir / "signals.jsonl", signals_jsonl + ("\n" if signals_jsonl else ""))
 
     lines = [
-        "# Header Active Scan Summary",
+        "# HeaderProof Scan Summary",
         "",
         f"- generated: {datetime.now().isoformat(timespec='seconds')}",
         f"- urls: {len(results)}",
@@ -1617,7 +1634,7 @@ def main_from_args(argv: list[str] | None = None) -> int:
         print("ERROR: No usable URLs found in input file.", file=sys.stderr)
         return 2
 
-    out_dir = Path(args.out_dir) if args.out_dir else Path("evidence") / f"header-scan-{datetime.now():%Y%m%d-%H%M%S}"
+    out_dir = Path(args.out_dir) if args.out_dir else Path("evidence") / f"headerproof-{datetime.now():%Y%m%d-%H%M%S}"
     emit_scan_start(input_path, len(urls), args, out_dir)
 
     results: list[dict[str, Any]] = []
