@@ -28,6 +28,12 @@ dependencies = []
 [project.optional-dependencies]
 test = ["pytest>=8"]
 
+[project.urls]
+Homepage = "https://github.com/TayfurYldz/headerproof"
+Repository = "https://github.com/TayfurYldz/headerproof"
+Issues = "https://github.com/TayfurYldz/headerproof/issues"
+Changelog = "https://github.com/TayfurYldz/headerproof/blob/main/CHANGELOG.md"
+
 [project.scripts]
 headerproof = "header_active_scan:main"
 

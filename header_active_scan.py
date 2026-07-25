@@ -1612,7 +1612,10 @@ def print_console_summary(results: list[dict[str, Any]], out_dir: Path, as_json:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Active header/CORS/CSRF/cache/content-spoofing scanner")
+    parser = argparse.ArgumentParser(
+        prog=PRODUCT_NAME.lower(),
+        description="Fast, low-noise active scanner for CORS, CSRF, header injection, cache poisoning, and content spoofing leads.",
+    )
     parser.add_argument("-i", dest="input", required=True, help="File containing one URL per line or httpx-style JSONL")
     parser.add_argument("--concurrency", type=int, default=16, help="Concurrent URL workers")
     return parser

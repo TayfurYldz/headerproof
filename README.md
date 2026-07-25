@@ -1,5 +1,7 @@
 # HeaderProof
 
+[![HeaderProof CI](https://github.com/TayfurYldz/headerproof/actions/workflows/ci.yml/badge.svg)](https://github.com/TayfurYldz/headerproof/actions/workflows/ci.yml)
+
 Fast, low-noise active scanner for header-driven web security leads.
 
 ```text
@@ -23,13 +25,16 @@ The scanner is intentionally conservative. Header-only observations are treated 
 ## Quick Start
 
 ```bash
-python3 header_active_scan.py -i urls.txt --concurrency 16
+pipx install git+https://github.com/TayfurYldz/headerproof.git
+headerproof -i urls.txt --concurrency 16
 ```
 
-Installed entrypoint:
+Run from a clone without installing:
 
 ```bash
-headerproof -i urls.txt --concurrency 16
+git clone https://github.com/TayfurYldz/headerproof.git
+cd headerproof
+./headerproof -i urls.txt --concurrency 16
 ```
 
 Input can be a plain text URL list or httpx-style JSONL containing `url` fields.
@@ -43,7 +48,7 @@ https://api.example.com/v1/me
 ## CLI
 
 ```bash
-python3 header_active_scan.py -i urls.txt --concurrency 32
+headerproof -i urls.txt --concurrency 32
 ```
 
 Supported runtime options are deliberately small:

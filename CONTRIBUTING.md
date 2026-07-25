@@ -13,4 +13,5 @@ Before submitting a change:
 ```bash
 python3 -m py_compile header_active_scan.py file_safety.py
 python3 -m pytest -q
+./headerproof -h
 ```
