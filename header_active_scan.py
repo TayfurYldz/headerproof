@@ -56,7 +56,8 @@ SEVERITY_ORDER = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
 CONFIDENCE_ORDER = {"high": 3, "medium": 2, "low": 1}
 ALERT_LOCK = threading.Lock()
 PRODUCT_NAME = "HeaderProof"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+REPORT_READY_THRESHOLD = 95
 BANNER = r"""
     __  __               __          ____                   __
    / / / /__  ____ _____/ /__  _____/ __ \________  ____  / /
@@ -64,7 +65,7 @@ BANNER = r"""
  / __  /  __/ /_/ / /_/ /  __/ /  / ____/ /  /  __/ /_/ /_/
 /_/ /_/\___/\__,_/\__,_/\___/_/  /_/   /_/   \___/\____(_)
 """
-FP_CERTAINTY_DEFAULTS = {"strict": 70, "balanced": 55, "all": 0}
+FP_CERTAINTY_DEFAULTS = {"strict": REPORT_READY_THRESHOLD, "balanced": 70, "all": 0}
 PROFILE_DEFAULTS = {
     "fast": {
         "timeout": 2.0,
@@ -74,7 +75,7 @@ PROFILE_DEFAULTS = {
         "origin_mode": "single",
         "header_probe_limit": 3,
         "no_preflight": True,
-        "no_cache_confirm": True,
+        "no_cache_confirm": False,
     },
     "balanced": {
         "timeout": 2.5,
@@ -567,7 +568,7 @@ def assess_signal(signal: dict[str, Any]) -> dict[str, Any]:
         missing.append(f"probe returned HTTP {status}, reducing confidence")
 
     if signal_type == "cors_arbitrary_origin_with_credentials":
-        score = 82
+        score = 78
         reasons.extend(["exact Origin reflected", "Access-Control-Allow-Credentials is true"])
         if evidence.get("unsafe_methods"):
             score += 3
@@ -582,7 +583,7 @@ def assess_signal(signal: dict[str, Any]) -> dict[str, Any]:
         reasons.append("wildcard ACAO observed")
         missing.append("wildcard CORS alone is normally not reportable")
     elif signal_type == "cors_cache_poisoning_candidate":
-        score = 70
+        score = 64
         reasons.extend(["reflected Origin on cacheable response", "Vary: Origin missing"])
         missing.append("second-client poisoned response not proven")
     elif signal_type == "csrf_cookie_samesite_missing":
@@ -602,31 +603,42 @@ def assess_signal(signal: dict[str, Any]) -> dict[str, Any]:
         reasons.append("cookie attribute hardening issue")
         missing.append("no exploitable session or CSRF impact proven")
     elif signal_type == "header_poisoning_candidate":
-        score = 76
+        score = 82
         reasons.append("canary reached security-relevant response header")
         missing.append("victim-observable impact not independently proven")
     elif signal_type == "header_reflection_candidate":
-        score = 58
+        score = 48
         reasons.append("canary reached response header")
         missing.append("plain reflection does not prove header control or splitting")
     elif signal_type == "header_based_content_spoofing":
-        score = 52
+        score = 42
         reasons.append("header canary reached textual response body")
         missing.append("trusted victim-visible spoofing or cache impact not proven")
     elif signal_type == "unkeyed_header_cache_poisoning_candidate":
-        score = 72
+        score = 66
         reasons.extend(["header canary reflected", "response has cache indicators"])
         missing.append("clean second-client cached response not proven")
     elif signal_type == "cache_poisoning_confirmed_on_cache_buster_url":
-        score = 96
-        reasons.extend(["poison request contained canary", "clean follow-up response contained canary"])
-        missing.append("repeat on production-relevant low-traffic path and second client before report")
+        if evidence.get("cache_indicators") or evidence.get("victim_cache_indicators"):
+            score = 96
+            reasons.extend(
+                [
+                    "poison request contained canary",
+                    "clean follow-up response contained canary",
+                    "cache headers were present during confirmation",
+                ]
+            )
+            missing.append("repeat from an independent network/client before final report submission")
+        else:
+            score = 86
+            reasons.extend(["poison request contained canary", "clean follow-up response contained canary"])
+            missing.append("cache indicators were absent; rule out origin-side state before reporting")
     elif signal_type == "query_parameter_content_reflection":
         score = 32
         reasons.append("query canary reflected in textual body")
         missing.append("plain reflection lacks trusted-context, cache, or script impact")
     elif signal_type == "query_parameter_header_reflection":
-        score = 68
+        score = 58
         reasons.append("query canary reached response header")
         missing.append("arbitrary header setting or response splitting not proven")
     elif signal_type == "response_splitting_crlf_candidate":
@@ -639,7 +651,17 @@ def assess_signal(signal: dict[str, Any]) -> dict[str, Any]:
             missing.append("parsed arbitrary header not proven")
 
     score = max(0, min(100, score))
-    reportability = "report_ready" if score >= 95 else "strong_lead" if score >= 70 else "manual_review" if score >= 55 else "suppress_by_default"
+    reportability = (
+        "report_ready"
+        if score >= REPORT_READY_THRESHOLD
+        else "probable_lead"
+        if score >= 85
+        else "needs_manual_proof"
+        if score >= 70
+        else "manual_review"
+        if score >= 55
+        else "suppress_by_default"
+    )
     return {
         "score": score,
         "level": certainty_level(score),
@@ -667,6 +689,9 @@ def signal_passes_fp_filter(signal: dict[str, Any], fp_mode: str, min_certainty:
     if certainty_score < min_certainty:
         return False
 
+    if fp_mode == "strict" and signal.get("certainty", {}).get("reportability") != "report_ready":
+        return False
+
     if signal_type == "csrf_cookie_samesite_missing" and not evidence.get("likely_auth_cookie"):
         return False
     if signal_type == "cookie_samesite_none_without_secure":
@@ -686,6 +711,11 @@ def signal_passes_fp_filter(signal: dict[str, Any], fp_mode: str, min_certainty:
 
 
 def alert_allowed(signal: dict[str, Any], min_confidence: str) -> bool:
+    certainty = signal.get("certainty", {})
+    if certainty.get("reportability") != "report_ready":
+        return False
+    if certainty.get("score", 0) < REPORT_READY_THRESHOLD:
+        return False
     return CONFIDENCE_ORDER.get(signal.get("confidence", "low"), 0) >= CONFIDENCE_ORDER[min_confidence]
 
 
@@ -724,19 +754,23 @@ def shorten(value: Any, limit: int = 180) -> str:
     return text[: limit - 3] + "..."
 
 
+def progress_bar(percent: float, width: int = 18) -> str:
+    filled = max(0, min(width, int(round((percent / 100) * width))))
+    return "█" * filled + "░" * (width - filled)
+
+
 def ui_box(title: str, lines: list[str], color: str = "", stream: Any | None = None) -> None:
     stream = sys.stderr if stream is None else stream
-    width = 96
+    width = 100
     reset = reset_color(bool(color))
-    top = "+" + "-" * (width - 2) + "+"
-    title_text = f" {title} "
-    header = "|" + title_text[: width - 2].center(width - 2) + "|"
-    rendered = [top, header, top]
+    title_text = f" {shorten(title, width - 6)} "
+    top = "╭" + title_text + "─" * max(0, width - len(title_text) - 2) + "╮"
+    rendered = [top]
     for line in lines:
         wrapped = wrap(str(line), width=width - 6, replace_whitespace=False) or [""]
         for part in wrapped:
-            rendered.append("|  " + part.ljust(width - 6) + "  |")
-    rendered.append(top)
+            rendered.append("│  " + part.ljust(width - 6) + "  │")
+    rendered.append("╰" + "─" * (width - 2) + "╯")
     with ALERT_LOCK:
         print(color + "\n".join(rendered) + reset, file=stream, flush=True)
 
@@ -759,10 +793,10 @@ def emit_scan_start(input_path: Path, url_count: int, args: argparse.Namespace, 
         ui_kv("Input", input_path),
         ui_kv("URLs", url_count),
         ui_kv("Concurrency", args.concurrency),
-        ui_kv("Mode", "fast + strict false-positive filter"),
+        ui_kv("Mode", "evidence-first; live cards only for report-ready findings"),
         ui_kv("URL budget", f"{args.url_timeout:.1f}s max per URL"),
         ui_kv("Request timeout", f"{args.timeout:.1f}s"),
-        ui_kv("Live alerts", "enabled; only high-certainty leads are printed"),
+        ui_kv("Live findings", f"enabled; requires >= {REPORT_READY_THRESHOLD}% automated proof"),
         ui_kv("Evidence", out_dir),
     ]
     emit_banner(args)
@@ -782,10 +816,11 @@ def emit_progress(
     timed_out = sum(1 for result in results if result["status"] == "partial_timeout")
     filtered = sum(result.get("filtered_signals", 0) for result in results)
     percent = (completed / total) * 100 if total else 100
+    bar = progress_bar(percent)
     line = (
-        f"[headerproof] {completed}/{total} ({percent:5.1f}%) "
-        f"rate={rate:.1f}/s eta={format_duration(remaining)} "
-        f"timeouts={timed_out} alerts={total_signals} filtered={filtered}"
+        f"HeaderProof  {bar}  {completed}/{total} {percent:5.1f}%  "
+        f"{rate:.1f}/s  eta {format_duration(remaining)}  "
+        f"confirmed {total_signals}  suppressed {filtered}  timeouts {timed_out}"
     )
     with ALERT_LOCK:
         print(line, file=sys.stderr, flush=True)
@@ -846,30 +881,33 @@ def emit_live_alert(url: str, signal: dict[str, Any], args: argparse.Namespace) 
     method = request_data.get("method", "?")
     request_url = request_data.get("url", url)
     missing = certainty.get("missing_proof", [])
+    reasons = certainty.get("reasons", [])
     confirmation = plan.get("manual_confirmation", []) if isinstance(plan, dict) else []
 
     lines = [
+        ui_kv("Finding", signal.get("title", "")),
+        ui_kv("Class", signal.get("check", "")),
         ui_kv("Type", signal.get("type", "")),
-        ui_kv("URL", shorten(url, 220)),
-        ui_kv("Title", signal.get("title", "")),
-        ui_kv("Check", signal.get("check", "")),
+        ui_kv("Target", shorten(url, 220)),
         ui_kv("HTTP", f"{method} {status} in {elapsed}ms"),
-        ui_kv("Certainty", f"{certainty.get('score', 0)}% / {certainty.get('level', 'unknown')}"),
-        ui_kv("Report gate", certainty.get("reportability", "unknown")),
-        ui_kv("Request", shorten(request_url, 220)),
+        ui_kv("Proof score", f"{certainty.get('score', 0)}% / {certainty.get('level', 'unknown')}"),
+        ui_kv("Gate", certainty.get("reportability", "unknown")),
+        ui_kv("Replay", shorten(request_url, 220)),
         "",
-        "Evidence",
+        "Why it is shown",
     ]
+    lines.extend(f"  - {shorten(item, 170)}" for item in reasons[:4])
+    lines.extend(["", "Evidence"])
     lines.extend(f"  {line}" for line in format_evidence_lines(signal.get("evidence", {})))
     if missing:
-        lines.extend(["", "Missing Proof"])
+        lines.extend(["", "Still verify before reporting"])
         lines.extend(f"  - {shorten(item, 160)}" for item in missing[:4])
     if confirmation:
-        lines.extend(["", "Validation Plan"])
+        lines.extend(["", "Next validation"])
         lines.extend(f"  {index}. {shorten(item, 170)}" for index, item in enumerate(confirmation[:4], 1))
     lines.extend(["", fp_guard_line(signal), f"Next: {signal.get('next_step', '')}"])
     title = (
-        f"ALERT {severity.upper()} / {signal.get('confidence', 'low').upper()} / "
+        f"CONFIRMED FINDING · {severity.upper()} · "
         f"{certainty.get('score', 0)}% {certainty.get('level', 'unknown').upper()}"
     )
     ui_box(title, lines, color=color)
@@ -1162,7 +1200,9 @@ def analyze_header_probe(
             )
         )
 
-    if victim and canary_locations(victim, canary):
+    victim_locations = canary_locations(victim, canary) if victim else []
+    victim_indicators = cache_indicators(victim) if victim else []
+    if victim_locations and (cacheable or victim_indicators):
         signals.append(
             make_signal(
                 "cache-poisoning",
@@ -1173,8 +1213,11 @@ def analyze_header_probe(
                 {
                     "probe_header": header_name,
                     "poison_locations": locations,
-                    "victim_locations": canary_locations(victim, canary),
-                    "cache_indicators": indicators + cache_indicators(victim),
+                    "victim_locations": victim_locations,
+                    "clean_follow_up": True,
+                    "cacheable_probe": cacheable,
+                    "cache_indicators": sorted(set(indicators + victim_indicators)),
+                    "victim_cache_indicators": victim_indicators,
                 },
                 victim,
                 "Repeat on an authorized low-traffic path and prove cross-client reachability before reporting.",
@@ -1258,6 +1301,7 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
         "baseline": None,
         "signals": [],
         "filtered_signals": 0,
+        "duplicate_signals": 0,
         "errors": [],
     }
 
@@ -1305,12 +1349,18 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
         options = fetch_budgeted(url, "OPTIONS")
 
     signals: list[dict[str, Any]] = []
+    seen_signal_keys: set[tuple[str, str]] = set()
 
     def add_signals(new_signals: list[dict[str, Any]]) -> None:
         for signal in new_signals:
             if not signal_passes_fp_filter(signal, args.fp_mode, args.min_certainty):
                 result["filtered_signals"] += 1
                 continue
+            signal_key = (signal.get("check", ""), signal.get("type", ""))
+            if args.fp_mode == "strict" and signal_key in seen_signal_keys:
+                result["duplicate_signals"] += 1
+                continue
+            seen_signal_keys.add(signal_key)
             signals.append(signal)
             emit_live_alert(url, signal, args)
 
@@ -1425,7 +1475,13 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
 
     run_probe_tasks(probe_tasks)
 
-    signals.sort(key=lambda item: SEVERITY_ORDER.get(item["severity"], 0), reverse=True)
+    signals.sort(
+        key=lambda item: (
+            item.get("certainty", {}).get("score", 0),
+            SEVERITY_ORDER.get(item["severity"], 0),
+        ),
+        reverse=True,
+    )
     result["signals"] = signals
     result["time_budget"]["elapsed_ms"] = int(budget.elapsed() * 1000)
     if result["status"] != "partial_timeout":
@@ -1514,10 +1570,11 @@ def write_outputs(results: list[dict[str, Any]], out_dir: Path) -> None:
         f"- urls: {len(results)}",
         f"- scanned: {sum(1 for item in results if item['status'] == 'scanned')}",
         f"- partial_timeout: {sum(1 for item in results if item['status'] == 'partial_timeout')}",
-        f"- signals: {len(flat_signals)}",
+        f"- confirmed_findings: {len(flat_signals)}",
         f"- filtered_signals: {sum(item.get('filtered_signals', 0) for item in results)}",
+        f"- duplicate_signals: {sum(item.get('duplicate_signals', 0) for item in results)}",
         "",
-        "| URL | Status | Signals | Top Types |",
+        "| URL | Status | Confirmed | Top Types |",
         "| --- | --- | ---: | --- |",
     ]
     for item in results:
@@ -1576,12 +1633,21 @@ def write_verification_plan(out_dir: Path) -> None:
 
 def print_console_summary(results: list[dict[str, Any]], out_dir: Path, as_json: bool) -> None:
     flat = [signal for item in results for signal in item["signals"]]
+    sorted_flat = sorted(
+        flat,
+        key=lambda signal: (
+            signal.get("certainty", {}).get("score", 0),
+            SEVERITY_ORDER.get(signal.get("severity", "info"), 0),
+        ),
+        reverse=True,
+    )
     payload = {
         "urls": len(results),
         "scanned": sum(1 for item in results if item["status"] == "scanned"),
         "partial_timeout": sum(1 for item in results if item["status"] == "partial_timeout"),
-        "signals": len(flat),
+        "confirmed_findings": len(flat),
         "filtered_signals": sum(item.get("filtered_signals", 0) for item in results),
+        "duplicate_signals": sum(item.get("duplicate_signals", 0) for item in results),
         "by_severity": dict(Counter(signal["severity"] for signal in flat)),
         "by_certainty": dict(Counter(signal.get("certainty", {}).get("level", "unknown") for signal in flat)),
         "by_type": dict(Counter(signal["type"] for signal in flat).most_common()),
@@ -1594,8 +1660,9 @@ def print_console_summary(results: list[dict[str, Any]], out_dir: Path, as_json:
         ui_kv("URLs", payload["urls"]),
         ui_kv("Scanned", payload["scanned"]),
         ui_kv("Partial timeout", payload["partial_timeout"]),
-        ui_kv("Alerts", payload["signals"]),
-        ui_kv("Filtered", payload["filtered_signals"]),
+        ui_kv("Confirmed", payload["confirmed_findings"]),
+        ui_kv("Suppressed", payload["filtered_signals"]),
+        ui_kv("Duplicates", payload["duplicate_signals"]),
         ui_kv("Severity", payload["by_severity"] or "none"),
     ]
     if payload["by_certainty"]:
@@ -1608,7 +1675,19 @@ def print_console_summary(results: list[dict[str, Any]], out_dir: Path, as_json:
             ui_kv("Files", "results.jsonl, signals.jsonl, summary.md, verification-plan.md"),
         ]
     )
-    ui_box("SCAN COMPLETE", lines, stream=sys.stdout)
+    if sorted_flat:
+        lines.extend(["", "Confirmed findings"])
+        for signal in sorted_flat[:5]:
+            certainty = signal.get("certainty", {})
+            lines.append(
+                (
+                    f"  {certainty.get('score', 0)}%  {signal.get('severity', '').upper():<7} "
+                    f"{signal.get('type', '')}  {shorten(signal.get('title', ''), 80)}"
+                )
+            )
+    else:
+        lines.extend(["", "No confirmed findings met the report-ready gate."])
+    ui_box("SCAN COMPLETE · EVIDENCE-FIRST RESULTS", lines, stream=sys.stdout)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1657,6 +1736,7 @@ def main_from_args(argv: list[str] | None = None) -> int:
                     "baseline": None,
                     "signals": [],
                     "filtered_signals": 0,
+                    "duplicate_signals": 0,
                     "errors": [repr(exc)],
                 }
             results.append(item)

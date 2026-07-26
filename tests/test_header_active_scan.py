@@ -117,9 +117,9 @@ def test_header_active_scan_fast_defaults(tmp_path: Path) -> None:
     assert args.origin_mode == "single"
     assert args.header_probe_limit == 3
     assert args.no_preflight is True
-    assert args.no_cache_confirm is True
+    assert args.no_cache_confirm is False
     assert args.fp_mode == "strict"
-    assert args.min_certainty == 70
+    assert args.min_certainty == 95
     assert args.min_alert_confidence == "medium"
     assert args.no_live_alerts is False
 
@@ -186,19 +186,20 @@ def test_header_active_scan_live_alerts_and_strict_filtering(tmp_path: Path, cap
         captured = capsys.readouterr()
         signal_types = {signal["type"] for signal in result["signals"]}
 
-        assert "ALERT HIGH / HIGH /" in captured.err
-        assert "cors_arbitrary_origin_with_credentials" in captured.err
+        assert "CONFIRMED FINDING" in captured.err
+        assert "response_splitting_crlf_candidate" in captured.err
         assert "Evidence" in captured.err
         assert "FP guard:" in captured.err
-        assert "Missing Proof" in captured.err
-        assert "Validation Plan" in captured.err
-        assert "cors_arbitrary_origin_with_credentials" in signal_types
+        assert "Still verify before reporting" in captured.err
+        assert "Next validation" in captured.err
+        assert "response_splitting_crlf_candidate" in signal_types
+        assert "cors_arbitrary_origin_with_credentials" not in signal_types
         assert "query_parameter_content_reflection" not in signal_types
         assert result["filtered_signals"] >= 1
-        cors_signal = next(signal for signal in result["signals"] if signal["type"] == "cors_arbitrary_origin_with_credentials")
-        assert cors_signal["certainty"]["score"] >= 70
-        assert cors_signal["certainty"]["reportability"] == "strong_lead"
-        assert "verification_plan" in cors_signal
+        confirmed_signal = next(signal for signal in result["signals"] if signal["type"] == "response_splitting_crlf_candidate")
+        assert confirmed_signal["certainty"]["score"] >= 95
+        assert confirmed_signal["certainty"]["reportability"] == "report_ready"
+        assert "verification_plan" in confirmed_signal
     finally:
         server.shutdown()
         server.server_close()

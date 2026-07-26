@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+
+- Tightened default strict mode to show live cards only for report-ready findings.
+- Suppressed lead-only CORS, CSRF cookie, header reflection, cache candidate, and content reflection noise by default.
+- Required clean cache follow-up plus cache indicators before cache poisoning is treated as confirmed.
+- Added modern evidence-first terminal cards and clearer final run summaries.
+
 ## 1.0.0
 
 - Branded the project as HeaderProof.

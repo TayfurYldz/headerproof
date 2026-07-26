@@ -12,7 +12,7 @@ Fast, low-noise active scanner for header-driven web security leads.
 /_/ /_/\___/\__,_/\__,_/\___/_/  /_/   /_/   \___/\____(_)
 ```
 
-It scans a supplied URL list and live-alerts high-certainty findings for:
+It scans a supplied URL list and only live-alerts findings that pass the report-ready proof gate for:
 
 - CORS misconfiguration
 - CSRF cookie risk signals
@@ -20,7 +20,7 @@ It scans a supplied URL list and live-alerts high-certainty findings for:
 - Web cache poisoning candidates
 - Content spoofing and reflection paths
 
-The scanner is intentionally conservative. Header-only observations are treated as leads unless the automated evidence is strong enough to pass the built-in report gate. It writes raw evidence and a manual verification plan so you can prove impact before reporting.
+The scanner is intentionally conservative. Header-only observations are suppressed by default unless the automated evidence is strong enough to pass the built-in report gate. It writes raw evidence and a manual verification plan so you can prove impact before reporting.
 
 ## Quick Start
 
@@ -56,27 +56,27 @@ Supported runtime options are deliberately small:
 - `-i`: URL input file.
 - `--concurrency`: concurrent URL workers.
 
-Per-URL time budget is fixed at 9 seconds. The scanner uses fast internal defaults, strict false-positive filtering, and live alert output without requiring tuning flags.
+Per-URL time budget is fixed at 9 seconds. The scanner uses fast internal defaults, strict false-positive filtering, and live output only for report-ready findings without requiring tuning flags.
 
 ## Output
 
 Each run creates an evidence directory under `evidence/headerproof-YYYYmmdd-HHMMSS/`.
 
 - `results.jsonl`: one full scan record per URL.
-- `signals.jsonl`: flattened findings only.
+- `signals.jsonl`: flattened report-ready findings only.
 - `summary.md`: human-readable run summary.
 - `verification-plan.md`: per-class confirmation steps and report gates.
 
-Live alerts are printed as soon as a signal passes the strict filter. Each alert includes certainty score, missing proof, false-positive guardrails, evidence, and the next validation step.
+Live cards are printed only after a signal reaches the report-ready gate. Each card includes proof score, why it was shown, evidence, false-positive guardrails, and the next validation step.
 
 ## Detection Philosophy
 
 The goal is speed with useful signal, not noisy checklist output.
 
-- CORS findings require exact ACAO/ACAC evidence from active origin probes.
-- CSRF findings focus on likely auth/session cookies, not every missing SameSite flag.
-- Cache poisoning candidates require cache indicators or clean follow-up evidence.
-- Header injection separates plain reflection from CRLF response splitting.
+- CORS header looseness is treated as a lead, not a live finding, unless impact is independently proven.
+- CSRF cookie attributes are suppressed by default because state change and read-back are required.
+- Cache poisoning requires a clean follow-up response plus cache indicators before it becomes report-ready.
+- Header injection separates plain reflection from parsed CRLF response splitting.
 - Content spoofing is suppressed by default unless it gains cache, header, or security impact.
 
 ## Requirements
