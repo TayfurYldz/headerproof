@@ -44,8 +44,8 @@ Developer run from a clone:
 
 ```bash
 git clone https://github.com/TayfurYldz/headerproof.git
-cd headerproof
-./headerproof -i urls.txt --concurrency 16
+sh headerproof/install.sh
+headerproof -i urls.txt --concurrency 16
 ```
 
 Input can be a plain text URL list or httpx-style JSONL containing `url` fields.
@@ -78,25 +78,39 @@ Supported runtime options stay focused on safe scanner behavior:
 
 Per-URL time budget is fixed at 9 seconds. The scanner uses strict false-positive filtering and live output only for report-ready findings by default.
 
+## Architecture
+
+The package uses a `src/` layout and keeps runtime responsibilities separated:
+
+- `src/headerproof/cli.py`: argument parsing and batch orchestration.
+- `src/headerproof/engine.py`: per-URL scan flow, bounded task submission, and global HTTP request semaphore.
+- `src/headerproof/detectors.py`: CORS, CSRF, CRLF, header reflection, cache, and content spoofing detectors.
+- `src/headerproof/evidence.py`: report gate, evidence ranking, verification plans, and false-positive filters.
+- `src/headerproof/transport.py`: HTTP client, timeout budget, and response serialization.
+- `src/headerproof/output.py`: JSONL, Markdown summary, and verification-plan writers.
+
 ## Output
 
 Each run creates an evidence directory under `evidence/headerproof-YYYYmmdd-HHMMSS/`.
 
 - `metadata.json`: tool version, git commit, command line, URL count, and scan config.
 - `results.jsonl`: one full scan record per URL.
+- `observations.jsonl`: every detector observation, including strict-mode suppressed and duplicate leads.
+- `probes.jsonl`: every recorded HTTP request/response exchange with probe role and ID.
 - `signals.jsonl`: flattened report-ready findings only.
 - `summary.md`: human-readable run summary.
 - `verification-plan.md`: per-class confirmation steps and report gates.
 
-Live cards are printed only after a signal reaches the report-ready gate. Each card includes proof score, why it was shown, evidence, false-positive guardrails, and the next validation step.
+Live cards are printed only after a signal reaches the report-ready gate. Each card includes evidence state, rank, why it was shown, evidence, false-positive guardrails, and the next validation step.
 
 Example live card:
 
 ```text
-╭ CONFIRMED FINDING · HIGH · 98% CONFIRMED ───────────────────────────────╮
+╭ CONFIRMED FINDING · HIGH · CONFIRMED ───────────────────────────────────╮
 │  Finding           CRLF query probe influenced response headers          │
 │  Type              response_splitting_crlf_candidate                     │
-│  Proof score       98% / confirmed                                       │
+│  Evidence state    confirmed                                             │
+│  Evidence rank     98/100                                                │
 │  Gate              report_ready                                          │
 │                                                                          │
 │  Why it is shown                                                         │
@@ -131,10 +145,10 @@ HeaderProof is a proof gate for technical primitives, not a replacement for impa
 
 ## Roadmap
 
-- Continue the module split from the compatibility wrapper + `scanner/cli.py` layout into `scanner/http.py`, `scanner/detections.py`, and `scanner/output.py`.
+- Continue reducing detector complexity with smaller per-class detector modules and deeper negative/positive cache fixtures.
 - Add more fixture coverage for CDN-specific cache headers and real-world CORS regex mistakes.
 - Publish signed GitHub releases with attached source archives and wheel artifacts.
-- Add PyPI publishing after the module split stabilizes.
+- Add PyPI publishing after the evidence schema stabilizes.
 
 ## Requirements
 

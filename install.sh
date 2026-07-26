@@ -14,7 +14,7 @@ fi
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || pwd)
 TMP_DIR=""
 
-if [ -f "$SCRIPT_DIR/header_active_scan.py" ] && [ -f "$SCRIPT_DIR/file_safety.py" ]; then
+if [ -f "$SCRIPT_DIR/header_active_scan.py" ] && [ -f "$SCRIPT_DIR/src/headerproof/file_safety.py" ]; then
     SRC_DIR=$SCRIPT_DIR
 else
     if ! command -v git >/dev/null 2>&1; then
@@ -29,15 +29,14 @@ fi
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
 cp "$SRC_DIR/header_active_scan.py" "$INSTALL_DIR/header_active_scan.py"
-cp "$SRC_DIR/file_safety.py" "$INSTALL_DIR/file_safety.py"
 cp "$SRC_DIR/headerproof" "$INSTALL_DIR/headerproof"
 cp "$SRC_DIR/README.md" "$INSTALL_DIR/README.md"
 cp "$SRC_DIR/LICENSE" "$INSTALL_DIR/LICENSE"
 cp "$SRC_DIR/CHANGELOG.md" "$INSTALL_DIR/CHANGELOG.md"
 cp "$SRC_DIR/pyproject.toml" "$INSTALL_DIR/pyproject.toml"
 
-mkdir -p "$INSTALL_DIR/scanner"
-cp "$SRC_DIR"/scanner/*.py "$INSTALL_DIR/scanner/"
+mkdir -p "$INSTALL_DIR/src/headerproof"
+cp "$SRC_DIR"/src/headerproof/*.py "$INSTALL_DIR/src/headerproof/"
 
 if [ -d "$SRC_DIR/examples" ]; then
     mkdir -p "$INSTALL_DIR/examples"

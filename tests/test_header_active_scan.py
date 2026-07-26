@@ -35,16 +35,17 @@ def make_snapshot(
 
 
 class ScannerFixtureHandler(BaseHTTPRequestHandler):
-    poisoned: dict[str, str] = {}
+    cache_entries: dict[str, str] = {}
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         return
 
-    def _send_common_headers(self) -> None:
+    def _send_common_headers(self, cache_status: str = "MISS", age: str = "0") -> None:
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "public, max-age=120")
         self.send_header("ETag", '"scanner-test"')
-        self.send_header("Age", "5")
+        self.send_header("X-Cache", cache_status)
+        self.send_header("Age", age)
         origin = self.headers.get("Origin")
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
@@ -63,12 +64,17 @@ class ScannerFixtureHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         canary = self._canary_from_headers()
         reflected = []
+        cache_status = "MISS"
+        age = "0"
+        cache_key = self.path
 
         if canary:
-            ScannerFixtureHandler.poisoned[self.path] = canary
+            ScannerFixtureHandler.cache_entries[cache_key] = canary
             reflected.append(f"header-reflect={canary}")
-        elif self.path in ScannerFixtureHandler.poisoned:
-            reflected.append(f"cached-reflect={ScannerFixtureHandler.poisoned[self.path]}")
+        elif cache_key in ScannerFixtureHandler.cache_entries:
+            reflected.append(f"cached-reflect={ScannerFixtureHandler.cache_entries[cache_key]}")
+            cache_status = "HIT"
+            age = "7"
 
         if "pa_reflect" in query:
             reflected.append(f"param-reflect={query['pa_reflect'][0]}")
@@ -77,7 +83,7 @@ class ScannerFixtureHandler(BaseHTTPRequestHandler):
         crlf_match = re.search(r"X-PA-Injected:\s*(pa-scan-[a-f0-9]+)", crlf_value)
 
         self.send_response(200)
-        self._send_common_headers()
+        self._send_common_headers(cache_status=cache_status, age=age)
         if canary:
             self.send_header("X-Reflected-Header", canary)
         if crlf_match:
@@ -92,6 +98,36 @@ class ScannerFixtureHandler(BaseHTTPRequestHandler):
             if match:
                 return match.group(1)
         return ""
+
+
+class ConcurrencyFixtureHandler(BaseHTTPRequestHandler):
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A002
+        return
+
+    def do_OPTIONS(self) -> None:
+        self.do_GET()
+
+    def do_GET(self) -> None:
+        with ConcurrencyFixtureHandler.lock:
+            ConcurrencyFixtureHandler.active += 1
+            ConcurrencyFixtureHandler.max_active = max(
+                ConcurrencyFixtureHandler.max_active,
+                ConcurrencyFixtureHandler.active,
+            )
+        try:
+            time.sleep(0.03)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(b"ok")
+        finally:
+            with ConcurrencyFixtureHandler.lock:
+                ConcurrencyFixtureHandler.active -= 1
 
 
 def test_header_active_scan_detects_core_signals(tmp_path: Path) -> None:
@@ -145,6 +181,17 @@ def test_header_active_scan_fast_defaults(tmp_path: Path) -> None:
     assert args.min_certainty == 95
     assert args.min_alert_confidence == "medium"
     assert args.no_live_alerts is False
+
+
+def test_header_active_scan_version(capsys) -> None:
+    try:
+        header_active_scan.parse_cli_args(["--version"])
+    except SystemExit as exc:
+        captured = capsys.readouterr()
+        assert exc.code == 0
+        assert "HeaderProof" in captured.out
+    else:
+        raise AssertionError("--version must exit cleanly")
 
 
 def test_header_active_scan_missing_input_is_clean_error(capsys) -> None:
@@ -268,6 +315,8 @@ def test_header_active_scan_writes_verification_plan(tmp_path: Path) -> None:
     summary = (tmp_path / "summary.md").read_text()
     assert "## Run Metadata" in summary
     assert "- git_commit: abc123" in summary
+    assert (tmp_path / "observations.jsonl").exists()
+    assert (tmp_path / "probes.jsonl").exists()
 
 
 def test_header_active_scan_live_alerts_and_strict_filtering(tmp_path: Path, capsys) -> None:
@@ -329,6 +378,8 @@ def test_main_json_out_dir_writes_metadata_and_machine_summary(tmp_path: Path, c
         assert metadata["config"]["profile"] == "fast"
         assert metadata["config"]["concurrency"] == 1
         assert metadata["command"][0] == "headerproof"
+        assert (out_dir / "observations.jsonl").read_text().splitlines()
+        assert (out_dir / "probes.jsonl").read_text().splitlines()
     finally:
         server.shutdown()
         server.server_close()
@@ -348,12 +399,26 @@ def test_scan_timeout_keeps_batch_moving(tmp_path: Path) -> None:
 
         result = header_active_scan.scan_url(url, args)
 
-        assert result["status"] in {"scanned", "partial_timeout"}
+        assert result["status"] in {"error", "partial_timeout"}
         assert result["time_budget"]["elapsed_ms"] < 900
         assert isinstance(result["errors"], list)
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_unreachable_baseline_is_error_not_scanned(tmp_path: Path) -> None:
+    input_file = tmp_path / "urls.txt"
+    input_file.write_text("http://127.0.0.1:1/\n")
+    args = header_active_scan.parse_cli_args(["-i", str(input_file), "--timeout", "0.05"])
+    args.no_live_alerts = True
+
+    result = header_active_scan.scan_url("http://127.0.0.1:1/", args)
+
+    assert result["status"] == "error"
+    assert result["errors"]
+    assert result["probes"]
+    assert result["signals"] == []
 
 
 def test_cors_vary_origin_suppresses_cache_poisoning_candidate() -> None:
@@ -382,6 +447,31 @@ def test_large_input_list_deduplicates_without_expanding_scope(tmp_path: Path) -
 
     assert len(urls) == 25
     assert urls[0] == "https://example.com/path-0"
+
+
+def test_main_respects_global_http_concurrency(tmp_path: Path, capsys) -> None:
+    ConcurrencyFixtureHandler.active = 0
+    ConcurrencyFixtureHandler.max_active = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ConcurrencyFixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        input_file = tmp_path / "urls.txt"
+        out_dir = tmp_path / "out"
+        urls = [f"http://127.0.0.1:{server.server_port}/demo?u={index}" for index in range(6)]
+        input_file.write_text("\n".join(urls) + "\n")
+
+        rc = header_active_scan.main_from_args(
+            ["-i", str(input_file), "--concurrency", "2", "--quiet", "--out-dir", str(out_dir)]
+        )
+        capsys.readouterr()
+
+        assert rc == 0
+        assert ConcurrencyFixtureHandler.max_active <= 2
+        assert (out_dir / "probes.jsonl").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_duplicate_report_ready_signal_types_are_suppressed(tmp_path: Path) -> None:
@@ -432,16 +522,27 @@ def test_cache_confirmation_requires_shared_cache_marker_for_report_ready() -> N
         body=f"poison={canary}",
         request_headers={"X-Forwarded-Host": canary},
     )
+    clean_before = make_snapshot(
+        {"Cache-Control": "public, max-age=120", "ETag": '"weak-proof"', "Age": "0"},
+        body="clean",
+    )
     clean_without_hit = make_snapshot(
         {"Cache-Control": "public, max-age=120", "ETag": '"weak-proof"'},
         body=f"cached={canary}",
+    )
+    fresh_control = make_snapshot(
+        {"Cache-Control": "public, max-age=120", "ETag": '"weak-proof"', "Age": "0"},
+        body="clean-control",
     )
 
     weak_signals = header_active_scan.analyze_header_probe(
         "X-Forwarded-Host",
         canary,
+        "probe-weak",
+        clean_before,
         poison,
         clean_without_hit,
+        fresh_control,
         save_body=False,
     )
     weak_confirmed = next(
@@ -458,8 +559,11 @@ def test_cache_confirmation_requires_shared_cache_marker_for_report_ready() -> N
     strong_signals = header_active_scan.analyze_header_probe(
         "X-Forwarded-Host",
         canary,
+        "probe-strong",
+        clean_before,
         poison,
         clean_with_hit,
+        fresh_control,
         save_body=False,
     )
     strong_confirmed = next(
@@ -468,6 +572,42 @@ def test_cache_confirmation_requires_shared_cache_marker_for_report_ready() -> N
     assert strong_confirmed["evidence"]["shared_cache_confirmed"] is True
     assert strong_confirmed["certainty"]["score"] >= 95
     assert strong_confirmed["certainty"]["reportability"] == "report_ready"
+
+
+def test_cache_confirmation_rejects_origin_side_state_with_static_age() -> None:
+    canary = "pa-scan-originstate"
+    clean_before = make_snapshot(
+        {"Cache-Control": "public, max-age=120", "Age": "5"},
+        body="clean",
+    )
+    poison = make_snapshot(
+        {"Cache-Control": "public, max-age=120", "Age": "5"},
+        body=f"poison={canary}",
+        request_headers={"X-Forwarded-Host": canary},
+    )
+    victim = make_snapshot(
+        {"Cache-Control": "public, max-age=120", "Age": "5"},
+        body=f"origin-memory={canary}",
+    )
+    fresh_control = make_snapshot(
+        {"Cache-Control": "public, max-age=120", "Age": "5"},
+        body="fresh-clean",
+    )
+
+    signals = header_active_scan.analyze_header_probe(
+        "X-Forwarded-Host",
+        canary,
+        "probe-origin-state",
+        clean_before,
+        poison,
+        victim,
+        fresh_control,
+        save_body=False,
+    )
+    reproduced = next(signal for signal in signals if signal["type"] == "cache_poisoning_confirmed_on_cache_buster_url")
+
+    assert reproduced["evidence"]["shared_cache_confirmed"] is False
+    assert reproduced["certainty"]["reportability"] != "report_ready"
 
 
 def test_install_scripts_are_executable_and_valid_shell() -> None:

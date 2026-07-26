@@ -1,9 +1,21 @@
 # Changelog
 
+## 1.3.0
+
+- Adopted a real `src/headerproof/` package layout with separate `models`, `transport`, `input`, `engine`, `detectors`, `evidence`, `output`, `metadata`, and `ui` modules.
+- Gave every header/cache detector an independent `probe_id`, canary, cache key, and fresh-key control request.
+- Reworked cache confirmation into a clean-baseline, poison, clean-victim, fresh-control state machine with shared-cache HIT/Age progression checks.
+- Preserved all suppressed and duplicate observations in `observations.jsonl`, and every HTTP exchange in `probes.jsonl`.
+- Marked unreachable baselines as `error` instead of `scanned`.
+- Added a global request semaphore and bounded URL future submission so `--concurrency N` caps active HTTP requests.
+- Removed percentage-style live certainty wording; findings now use evidence state plus `rank/100`.
+- Added `headerproof --version`, safer uninstall path validation, and CI build provenance attestation.
+- Cleaned HeaderProof-only file safety helpers and refreshed tests for unreachable targets, global concurrency, origin-side cache state, evidence files, and installed entrypoints.
+
 ## 1.2.0
 
 - Opened safe advanced CLI options: `--profile`, `--timeout`, `--origin`, `--header`, `--out-dir`, `--json`, and `--quiet`.
-- Started the module split by moving the implementation behind a small `header_active_scan.py` compatibility wrapper into `scanner/cli.py`.
+- Started the module split by moving the implementation behind a small `header_active_scan.py` compatibility wrapper.
 - Added `metadata.json` with tool version, git commit, command line, URL count, and scan config.
 - Added Kali-style `install.sh`, `uninstall.sh`, and `Makefile` targets so `headerproof` can run globally without changing into the project directory.
 - Tightened CRLF confirmation to require the exact per-request canary in the parsed `X-PA-Injected` response header value.
