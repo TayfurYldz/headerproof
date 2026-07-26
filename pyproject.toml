@@ -35,10 +35,11 @@ Issues = "https://github.com/TayfurYldz/headerproof/issues"
 Changelog = "https://github.com/TayfurYldz/headerproof/blob/main/CHANGELOG.md"
 
 [project.scripts]
-headerproof = "header_active_scan:main"
+headerproof = "scanner.cli:main"
 
 [tool.setuptools]
 py-modules = ["header_active_scan", "file_safety"]
+packages = ["scanner"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

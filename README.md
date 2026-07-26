@@ -131,7 +131,7 @@ HeaderProof is a proof gate for technical primitives, not a replacement for impa
 
 ## Roadmap
 
-- Split the current single-file implementation into `scanner/cli.py`, `scanner/http.py`, `scanner/detections.py`, and `scanner/output.py`.
+- Continue the module split from the compatibility wrapper + `scanner/cli.py` layout into `scanner/http.py`, `scanner/detections.py`, and `scanner/output.py`.
 - Add more fixture coverage for CDN-specific cache headers and real-world CORS regex mistakes.
 - Publish signed GitHub releases with attached source archives and wheel artifacts.
 - Add PyPI publishing after the module split stabilizes.

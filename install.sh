@@ -36,6 +36,9 @@ cp "$SRC_DIR/LICENSE" "$INSTALL_DIR/LICENSE"
 cp "$SRC_DIR/CHANGELOG.md" "$INSTALL_DIR/CHANGELOG.md"
 cp "$SRC_DIR/pyproject.toml" "$INSTALL_DIR/pyproject.toml"
 
+mkdir -p "$INSTALL_DIR/scanner"
+cp "$SRC_DIR"/scanner/*.py "$INSTALL_DIR/scanner/"
+
 if [ -d "$SRC_DIR/examples" ]; then
     mkdir -p "$INSTALL_DIR/examples"
     cp "$SRC_DIR"/examples/* "$INSTALL_DIR/examples/" 2>/dev/null || true

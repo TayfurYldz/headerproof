@@ -1,0 +1,2 @@
+"""HeaderProof scanner package."""
+

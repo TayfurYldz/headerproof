@@ -3,6 +3,7 @@
 ## 1.2.0
 
 - Opened safe advanced CLI options: `--profile`, `--timeout`, `--origin`, `--header`, `--out-dir`, `--json`, and `--quiet`.
+- Started the module split by moving the implementation behind a small `header_active_scan.py` compatibility wrapper into `scanner/cli.py`.
 - Added `metadata.json` with tool version, git commit, command line, URL count, and scan config.
 - Added Kali-style `install.sh`, `uninstall.sh`, and `Makefile` targets so `headerproof` can run globally without changing into the project directory.
 - Tightened CRLF confirmation to require the exact per-request canary in the parsed `X-PA-Injected` response header value.
