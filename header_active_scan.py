@@ -22,6 +22,7 @@ import json
 import re
 import secrets
 import socket
+import subprocess
 import ssl
 import sys
 import threading
@@ -56,7 +57,7 @@ SEVERITY_ORDER = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
 CONFIDENCE_ORDER = {"high": 3, "medium": 2, "low": 1}
 ALERT_LOCK = threading.Lock()
 PRODUCT_NAME = "HeaderProof"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 REPORT_READY_THRESHOLD = 95
 BANNER = r"""
     __  __               __          ____                   __
@@ -167,11 +168,17 @@ def normalise_url(raw: str) -> str | None:
             item = json.loads(raw)
         except json.JSONDecodeError:
             return None
+        if not isinstance(item, dict):
+            return None
+        found = False
         for key in ("url", "final_url", "input", "target"):
             value = item.get(key)
             if isinstance(value, str) and value.strip():
                 raw = value.strip()
+                found = True
                 break
+        if not found:
+            return None
     else:
         raw = raw.split()[0]
 
@@ -338,6 +345,7 @@ def cache_indicators(snap: HttpSnapshot) -> list[str]:
         "etag",
         "x-cache",
         "x-cache-hits",
+        "cache-status",
         "cf-cache-status",
         "cdn-cache-control",
         "surrogate-control",
@@ -362,6 +370,28 @@ def looks_cacheable(snap: HttpSnapshot) -> tuple[bool, list[str]]:
         for marker in ("max-age", "s-maxage", "public", "age=", "x-cache", "cf-cache-status", "etag")
     )
     return active, indicators
+
+
+def shared_cache_hit_markers(indicators: list[str]) -> list[str]:
+    markers: list[str] = []
+    for indicator in indicators:
+        name, _, value = indicator.partition("=")
+        name_l = name.lower()
+        value_l = value.lower()
+        if name_l == "age":
+            match = re.search(r"\d+", value_l)
+            if match and int(match.group(0)) > 0:
+                markers.append(indicator)
+        elif name_l == "x-cache-hits":
+            match = re.search(r"\d+", value_l)
+            if match and int(match.group(0)) > 0:
+                markers.append(indicator)
+        elif name_l in {"x-cache", "cf-cache-status", "cache-status", "akamai-cache-status", "server-timing"}:
+            has_hit = re.search(r"\b(hit|cached|revalidated)\b", value_l)
+            has_miss = re.search(r"\b(miss|bypass|dynamic|uncacheable|expired)\b", value_l)
+            if has_hit and not has_miss:
+                markers.append(indicator)
+    return markers
 
 
 def is_textual_response(snap: HttpSnapshot) -> bool:
@@ -619,20 +649,20 @@ def assess_signal(signal: dict[str, Any]) -> dict[str, Any]:
         reasons.extend(["header canary reflected", "response has cache indicators"])
         missing.append("clean second-client cached response not proven")
     elif signal_type == "cache_poisoning_confirmed_on_cache_buster_url":
-        if evidence.get("cache_indicators") or evidence.get("victim_cache_indicators"):
-            score = 96
+        if evidence.get("shared_cache_confirmed"):
+            score = 97
             reasons.extend(
                 [
                     "poison request contained canary",
                     "clean follow-up response contained canary",
-                    "cache headers were present during confirmation",
+                    "clean follow-up response included a shared-cache hit marker",
                 ]
             )
             missing.append("repeat from an independent network/client before final report submission")
         else:
-            score = 86
+            score = 88
             reasons.extend(["poison request contained canary", "clean follow-up response contained canary"])
-            missing.append("cache indicators were absent; rule out origin-side state before reporting")
+            missing.append("shared-cache HIT/Age proof was absent; rule out origin-side state before reporting")
     elif signal_type == "query_parameter_content_reflection":
         score = 32
         reasons.append("query canary reflected in textual body")
@@ -899,9 +929,11 @@ def emit_live_alert(url: str, signal: dict[str, Any], args: argparse.Namespace) 
     lines.extend(f"  - {shorten(item, 170)}" for item in reasons[:4])
     lines.extend(["", "Evidence"])
     lines.extend(f"  {line}" for line in format_evidence_lines(signal.get("evidence", {})))
+    lines.extend(["", "Still verify before reporting"])
     if missing:
-        lines.extend(["", "Still verify before reporting"])
         lines.extend(f"  - {shorten(item, 160)}" for item in missing[:4])
+    else:
+        lines.append("  - Repeat with a fresh canary and confirm real program impact before submission.")
     if confirmation:
         lines.extend(["", "Next validation"])
         lines.extend(f"  {index}. {shorten(item, 170)}" for index, item in enumerate(confirmation[:4], 1))
@@ -1202,6 +1234,7 @@ def analyze_header_probe(
 
     victim_locations = canary_locations(victim, canary) if victim else []
     victim_indicators = cache_indicators(victim) if victim else []
+    shared_markers = shared_cache_hit_markers(victim_indicators)
     if victim_locations and (cacheable or victim_indicators):
         signals.append(
             make_signal(
@@ -1218,6 +1251,8 @@ def analyze_header_probe(
                     "cacheable_probe": cacheable,
                     "cache_indicators": sorted(set(indicators + victim_indicators)),
                     "victim_cache_indicators": victim_indicators,
+                    "shared_cache_confirmed": bool(shared_markers),
+                    "shared_cache_hit_markers": shared_markers,
                 },
                 victim,
                 "Repeat on an authorized low-traffic path and prove cross-client reachability before reporting.",
@@ -1267,7 +1302,8 @@ def analyze_content_param(canary: str, snap: HttpSnapshot, save_body: bool) -> l
 
 
 def analyze_crlf_probe(canary: str, snap: HttpSnapshot, save_body: bool) -> list[dict[str, Any]]:
-    injected_header_seen = "x-pa-injected" in snap.headers
+    injected_header_values = snap.values("x-pa-injected")
+    injected_header_seen = any(value.strip() == canary for value in injected_header_values)
     locations = canary_locations(snap, canary)
     if not injected_header_seen and not locations:
         return []
@@ -1282,6 +1318,7 @@ def analyze_crlf_probe(canary: str, snap: HttpSnapshot, save_body: bool) -> list
             "CRLF query probe influenced response headers",
             {
                 "injected_header_seen": injected_header_seen,
+                "injected_header_values": injected_header_values[:3],
                 "locations": locations,
                 "probe": "%0d%0aX-PA-Injected:<canary>",
             },
@@ -1497,28 +1534,102 @@ def parse_checks(raw: str) -> set[str]:
     return checks or set(DEFAULT_CHECKS)
 
 
-def apply_profile_defaults(args: argparse.Namespace) -> argparse.Namespace:
-    defaults = PROFILE_DEFAULTS[args.profile]
-    for key, value in defaults.items():
-        if getattr(args, key) is None:
-            setattr(args, key, value)
-    return args
+def parse_header_name(raw: str) -> str:
+    name = raw.strip()
+    if not name:
+        raise argparse.ArgumentTypeError("header name cannot be empty")
+    if not re.fullmatch(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+", name):
+        raise argparse.ArgumentTypeError("invalid HTTP header name")
+    return name
+
+
+def safe_cli_args(argv: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next = False
+    for item in argv:
+        if redact_next:
+            redacted.append("<redacted>")
+            redact_next = False
+            continue
+        if item in {"--header"}:
+            redacted.append(item)
+            redact_next = True
+            continue
+        if item.startswith("--header="):
+            redacted.append("--header=<redacted>")
+            continue
+        redacted.append(item)
+    return redacted
+
+
+def current_git_commit() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(_TOOLS_DIR), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=0.5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def scan_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "profile": args.profile,
+        "checks": sorted(args.enabled_checks),
+        "concurrency": args.concurrency,
+        "per_url_concurrency": args.per_url_concurrency,
+        "request_timeout_seconds": args.timeout,
+        "url_budget_seconds": args.url_timeout,
+        "max_body_bytes": args.max_body,
+        "origin_mode": args.origin_mode,
+        "custom_origins": list(args.origin),
+        "custom_headers_count": len(args.header),
+        "header_probe_limit": args.header_probe_limit,
+        "preflight_enabled": not args.no_preflight,
+        "cache_confirmation_enabled": not args.no_cache_confirm,
+        "follow_redirects": args.follow_redirects,
+        "save_body_samples": args.save_body_samples,
+        "fp_mode": args.fp_mode,
+        "min_certainty": args.min_certainty,
+        "live_alerts": not args.no_live_alerts,
+    }
+
+
+def build_metadata(args: argparse.Namespace, input_path: Path, url_count: int) -> dict[str, Any]:
+    return {
+        "tool": PRODUCT_NAME,
+        "version": VERSION,
+        "git_commit": current_git_commit(),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "input": str(input_path),
+        "url_count": url_count,
+        "command": [PRODUCT_NAME.lower(), *safe_cli_args(getattr(args, "argv", []))],
+        "config": scan_config(args),
+    }
 
 
 def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
 
-    profile_defaults = PROFILE_DEFAULTS["fast"]
-    args.profile = "fast"
+    profile_defaults = PROFILE_DEFAULTS[args.profile]
+    args.argv = raw_argv
     args.enabled_checks = set(DEFAULT_CHECKS)
     args.fp_mode = "strict"
     args.min_alert_confidence = "medium"
     args.min_certainty = FP_CERTAINTY_DEFAULTS[args.fp_mode]
-    args.timeout = profile_defaults["timeout"]
+    args.timeout = profile_defaults["timeout"] if args.timeout is None else args.timeout
     args.url_timeout = 9.0
     args.max_body = profile_defaults["max_body"]
-    args.per_url_concurrency = profile_defaults["per_url_concurrency"]
+    args.concurrency = profile_defaults["concurrency"] if args.concurrency is None else args.concurrency
+    args.per_url_concurrency = min(profile_defaults["per_url_concurrency"], args.concurrency)
     args.origin_mode = profile_defaults["origin_mode"]
     args.header_probe_limit = profile_defaults["header_probe_limit"]
     args.no_preflight = profile_defaults["no_preflight"]
@@ -1528,15 +1639,12 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.follow_redirects = False
     args.save_body_samples = False
     args.no_crlf = False
-    args.origin = []
-    args.header = []
+    args.header = args.header or []
     args.content_param = "pa_reflect"
     args.progress_every = 50
-    args.quiet = False
-    args.no_live_alerts = False
+    args.quiet = bool(args.quiet or args.json)
+    args.no_live_alerts = bool(args.quiet)
     args.no_color = False
-    args.json = False
-    args.out_dir = ""
 
     args.concurrency = max(1, args.concurrency)
     args.per_url_concurrency = max(1, args.per_url_concurrency)
@@ -1550,8 +1658,17 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def write_outputs(results: list[dict[str, Any]], out_dir: Path) -> None:
+def write_outputs(results: list[dict[str, Any]], out_dir: Path, metadata: dict[str, Any] | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    metadata = metadata or {
+        "tool": PRODUCT_NAME,
+        "version": VERSION,
+        "git_commit": current_git_commit(),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "config": {},
+    }
+    atomic_write_text(out_dir / "metadata.json", json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+
     results_jsonl = "\n".join(json.dumps(item, sort_keys=True) for item in results) + "\n"
     atomic_write_text(out_dir / "results.jsonl", results_jsonl)
 
@@ -1566,13 +1683,21 @@ def write_outputs(results: list[dict[str, Any]], out_dir: Path) -> None:
     lines = [
         "# HeaderProof Scan Summary",
         "",
+        "## Run Metadata",
+        "",
         f"- generated: {datetime.now().isoformat(timespec='seconds')}",
+        f"- tool: {metadata.get('tool', PRODUCT_NAME)} {metadata.get('version', VERSION)}",
+        f"- git_commit: {metadata.get('git_commit') or 'unknown'}",
+        f"- command: {' '.join(str(item) for item in metadata.get('command', [])) or 'unknown'}",
+        f"- profile: {metadata.get('config', {}).get('profile', 'unknown')}",
         f"- urls: {len(results)}",
         f"- scanned: {sum(1 for item in results if item['status'] == 'scanned')}",
         f"- partial_timeout: {sum(1 for item in results if item['status'] == 'partial_timeout')}",
         f"- confirmed_findings: {len(flat_signals)}",
         f"- filtered_signals: {sum(item.get('filtered_signals', 0) for item in results)}",
         f"- duplicate_signals: {sum(item.get('duplicate_signals', 0) for item in results)}",
+        "",
+        "## Results",
         "",
         "| URL | Status | Confirmed | Top Types |",
         "| --- | --- | ---: | --- |",
@@ -1672,7 +1797,7 @@ def print_console_summary(results: list[dict[str, Any]], out_dir: Path, as_json:
     lines.extend(
         [
             ui_kv("Evidence", out_dir),
-            ui_kv("Files", "results.jsonl, signals.jsonl, summary.md, verification-plan.md"),
+            ui_kv("Files", "metadata.json, results.jsonl, signals.jsonl, summary.md, verification-plan.md"),
         ]
     )
     if sorted_flat:
@@ -1696,7 +1821,26 @@ def build_parser() -> argparse.ArgumentParser:
         description="Fast, low-noise active scanner for CORS, CSRF, header injection, cache poisoning, and content spoofing leads.",
     )
     parser.add_argument("-i", dest="input", required=True, help="File containing one URL per line or httpx-style JSONL")
-    parser.add_argument("--concurrency", type=int, default=16, help="Concurrent URL workers")
+    parser.add_argument("--concurrency", type=int, default=None, help="Concurrent URL workers")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILE_DEFAULTS),
+        default="fast",
+        help="Scan profile: fast keeps the 9s URL budget tight; balanced/thorough add more probes inside the same budget",
+    )
+    parser.add_argument("--timeout", type=float, default=None, help="Per-request timeout in seconds, capped by the 9s URL budget")
+    parser.add_argument("--origin", action="append", default=[], help="Additional Origin value to probe; repeatable")
+    parser.add_argument(
+        "--header",
+        action="append",
+        type=parse_header_name,
+        default=[],
+        metavar="NAME",
+        help="Additional request header name to probe with a generated canary value; repeatable",
+    )
+    parser.add_argument("--out-dir", default="", help="Evidence output directory")
+    parser.add_argument("--json", action="store_true", help="Print final summary as JSON and suppress live terminal UI")
+    parser.add_argument("--quiet", action="store_true", help="Suppress banner, progress, and live alert cards")
     return parser
 
 
@@ -1717,7 +1861,9 @@ def main_from_args(argv: list[str] | None = None) -> int:
         return 2
 
     out_dir = Path(args.out_dir) if args.out_dir else Path("evidence") / f"headerproof-{datetime.now():%Y%m%d-%H%M%S}"
-    emit_scan_start(input_path, len(urls), args, out_dir)
+    metadata = build_metadata(args, input_path, len(urls))
+    if not args.quiet:
+        emit_scan_start(input_path, len(urls), args, out_dir)
 
     results: list[dict[str, Any]] = []
     completed = 0
@@ -1746,7 +1892,7 @@ def main_from_args(argv: list[str] | None = None) -> int:
                 emit_progress(completed, len(urls), started_at, results, total_signals)
 
     results.sort(key=lambda item: item["url"])
-    write_outputs(results, out_dir)
+    write_outputs(results, out_dir, metadata)
     print_console_summary(results, out_dir, args.json)
     return 0
 
