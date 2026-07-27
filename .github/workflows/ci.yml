@@ -3,13 +3,12 @@ name: HeaderProof CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
 permissions:
   contents: read
-  id-token: write
-  attestations: write
 
 jobs:
   test:
@@ -28,24 +27,71 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install test dependencies
-        run: python -m pip install -U pip pytest build
+        run: python -m pip install --upgrade pip ".[test]"
 
       - name: Compile
         run: python -m compileall -q header_active_scan.py src/headerproof
 
+      - name: Ruff
+        run: python -m ruff check header_active_scan.py src/headerproof tests
+
+      - name: Mypy
+        run: python -m mypy
+
       - name: Test
         run: python -m pytest -q
 
-      - name: Build package
-        run: python -m build
+      - name: Proof-gate branch coverage
+        if: matrix.python-version == '3.13'
+        run: >-
+          python -m pytest -q
+          --cov=headerproof.detectors
+          --cov=headerproof.evidence
+          --cov-branch
+          --cov-fail-under=95
 
-      - name: Attest build artifacts
-        if: github.event_name == 'push'
+  package:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build package once
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Install built wheel
+        run: python -m pip install dist/*.whl
+
+      - name: Installed wheel real-scan smoke test
+        run: python tests/release_smoke.py
+
+      - name: Attest the exact release artifacts
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/*
 
-      - name: Installed entrypoint smoke test
-        run: |
-          python -m pip install dist/*.whl
-          headerproof --help
+      - name: Upload the attested artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: headerproof-dist-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish the same artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "HeaderProof $GITHUB_REF_NAME"

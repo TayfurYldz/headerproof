@@ -9,36 +9,14 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime
+from collections import Counter
 from pathlib import Path
-from typing import Any
 
-from .constants import DEFAULT_CHECKS, FP_CERTAINTY_DEFAULTS, PRODUCT_NAME, PROFILE_DEFAULTS, SCHEMA_VERSION, VERSION
-from .detectors import (
-    analyze_content_param,
-    analyze_cors_probe,
-    analyze_crlf_probe,
-    analyze_csrf,
-    analyze_header_probe,
-    cache_hit_progressed,
-    cache_indicators,
-    canary_locations,
-    default_header_probe_names,
-    default_origin_variants,
-    header_join,
-    header_probe_value,
-    looks_cacheable,
-    parse_cookie,
-    parse_methods,
-    shared_cache_hit_markers,
-)
+from .constants import DEFAULT_CHECKS, PRODUCT_NAME, PROFILE_DEFAULTS, SCHEMA_VERSION, VERSION
 from .engine import scan_url
-from .evidence import assess_signal, make_signal, signal_passes_fp_filter, verification_template
-from .input import add_query, add_raw_query, iter_urls, load_urls, normalise_url
-from .metadata import build_metadata, current_git_commit, safe_cli_args, scan_config
-from .models import HttpSnapshot
-from .output import print_console_summary, write_outputs
-from .transport import HttpClient, UrlBudget, snapshot_summary
+from .input import iter_urls
+from .metadata import build_metadata
+from .output import EvidenceWriter, print_console_summary, reserve_output_dir
 from .ui import emit_progress, emit_scan_start
 
 
@@ -69,7 +47,6 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.enabled_checks = set(DEFAULT_CHECKS)
     args.fp_mode = "strict"
     args.min_alert_confidence = "medium"
-    args.min_certainty = FP_CERTAINTY_DEFAULTS[args.fp_mode]
     args.timeout = profile_defaults["timeout"] if args.timeout is None else args.timeout
     args.url_timeout = 9.0
     args.max_body = profile_defaults["max_body"]
@@ -99,7 +76,6 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.max_body = max(0, args.max_body)
     args.header_probe_limit = max(0, args.header_probe_limit)
     args.progress_every = max(0, args.progress_every)
-    args.min_certainty = max(0, min(100, args.min_certainty))
     return args
 
 def build_parser() -> argparse.ArgumentParser:
@@ -143,32 +119,47 @@ def main_from_args(argv: list[str] | None = None) -> int:
         print(f"ERROR: input path is not a file: {input_path}", file=sys.stderr)
         return 2
 
-    url_iter = iter(iter_urls(input_path, max_urls=args.max_urls or None))
+    try:
+        out_dir = reserve_output_dir(Path(args.out_dir) if args.out_dir else None)
+    except (FileExistsError, OSError) as exc:
+        print(f"ERROR: cannot prepare evidence directory: {exc}", file=sys.stderr)
+        return 2
+
+    url_iter = iter(
+        iter_urls(
+            input_path,
+            max_urls=args.max_urls or None,
+            dedup_db=out_dir / "input-dedup.sqlite3",
+        )
+    )
     first_url = next(url_iter, None)
     if not first_url:
         print("ERROR: No usable URLs found in input file.", file=sys.stderr)
         return 2
 
-    out_dir = Path(args.out_dir) if args.out_dir else Path("evidence") / f"headerproof-{datetime.now():%Y%m%d-%H%M%S}"
     metadata = build_metadata(args, input_path, 0)
+    writer = EvidenceWriter(out_dir, metadata)
     args.request_semaphore = threading.BoundedSemaphore(args.concurrency)
     if not args.quiet:
         emit_scan_start(input_path, "streaming", args, out_dir)
 
-    results: list[dict[str, Any]] = []
     completed = 0
     submitted = 0
     total_signals = 0
+    filtered_signals = 0
+    statuses: Counter[str] = Counter()
     started_at = time.monotonic()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        futures: dict[concurrent.futures.Future, str] = {}
-        exhausted = False
+    interrupted = False
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency)
+    futures: dict[concurrent.futures.Future, str] = {}
+    exhausted = False
 
-        def submit_url(item_url: str) -> None:
-            nonlocal submitted
-            futures[executor.submit(scan_url, item_url, args)] = item_url
-            submitted += 1
+    def submit_url(item_url: str) -> None:
+        nonlocal submitted
+        futures[executor.submit(scan_url, item_url, args)] = item_url
+        submitted += 1
 
+    try:
         submit_url(first_url)
         while futures:
             while not exhausted and len(futures) < args.concurrency:
@@ -185,6 +176,7 @@ def main_from_args(argv: list[str] | None = None) -> int:
                 except Exception as exc:  # noqa: BLE001 - scanner should keep batch evidence moving.
                     item = {
                         "schema_version": SCHEMA_VERSION,
+                        "record_type": "result",
                         "url": url,
                         "status": "error",
                         "baseline": None,
@@ -193,19 +185,41 @@ def main_from_args(argv: list[str] | None = None) -> int:
                         "signals": [],
                         "filtered_signals": 0,
                         "duplicate_signals": 0,
-                        "errors": [repr(exc)],
+                        "errors": [
+                            {
+                                "error_type": "scan_worker_error",
+                                "message": f"{type(exc).__name__}: {exc}",
+                            }
+                        ],
+                        "coverage": [],
                     }
-                results.append(item)
+                writer.append_result(item)
                 completed += 1
+                statuses[item["status"]] += 1
                 total_signals += len(item["signals"])
+                filtered_signals += int(item.get("filtered_signals", 0))
                 if not args.quiet and args.progress_every and completed % args.progress_every == 0:
-                    emit_progress(completed, submitted, started_at, results, total_signals)
+                    emit_progress(
+                        completed,
+                        submitted,
+                        started_at,
+                        statuses,
+                        total_signals,
+                        filtered_signals,
+                    )
+    except KeyboardInterrupt:
+        interrupted = True
+        for future in futures:
+            future.cancel()
+    finally:
+        executor.shutdown(wait=not interrupted, cancel_futures=interrupted)
 
-    results.sort(key=lambda item: item["url"])
     metadata["url_count"] = submitted
-    write_outputs(results, out_dir, metadata)
-    print_console_summary(results, out_dir, args.json)
-    return 0
+    payload = writer.finalize()
+    print_console_summary(payload, out_dir, args.json)
+    if interrupted:
+        return 130
+    return 0 if payload["scanned"] else 1
 
 
 def main() -> int:

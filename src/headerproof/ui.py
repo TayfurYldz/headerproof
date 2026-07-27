@@ -5,18 +5,18 @@ import json
 import sys
 import threading
 import time
+from collections import Counter
 from textwrap import wrap
 from typing import Any
 
-from .constants import BANNER, CONFIDENCE_ORDER, PRODUCT_NAME, REPORT_READY_THRESHOLD, VERSION
+from .constants import BANNER, CONFIDENCE_ORDER, PRODUCT_NAME, VERSION
 
 ALERT_LOCK = threading.Lock()
 
+
 def alert_allowed(signal: dict[str, Any], min_confidence: str) -> bool:
-    certainty = signal.get("certainty", {})
-    if certainty.get("reportability") != "report_ready":
-        return False
-    if certainty.get("score", 0) < REPORT_READY_THRESHOLD:
+    assessment = signal.get("assessment", {})
+    if assessment.get("technical_gate") != "passed":
         return False
     return CONFIDENCE_ORDER.get(signal.get("confidence", "low"), 0) >= CONFIDENCE_ORDER[min_confidence]
 
@@ -95,10 +95,10 @@ def emit_scan_start(input_path: Any, url_count: int | str, args: argparse.Namesp
         ui_kv("Input", input_path),
         ui_kv("URLs", url_count),
         ui_kv("Concurrency", args.concurrency),
-        ui_kv("Mode", "evidence-first; live cards only for report-ready findings"),
+        ui_kv("Mode", "evidence-first; live cards only for verified technical signals"),
         ui_kv("URL budget", f"{args.url_timeout:.1f}s max per URL"),
         ui_kv("Request timeout", f"{args.timeout:.1f}s"),
-        ui_kv("Live findings", f"enabled; requires evidence rank >= {REPORT_READY_THRESHOLD}/100"),
+        ui_kv("Live signals", "enabled; requires an explicit detector proof gate"),
         ui_kv("Evidence", out_dir),
     ]
     emit_banner(args)
@@ -109,20 +109,21 @@ def emit_progress(
     completed: int,
     total: int,
     started_at: float,
-    results: list[dict[str, Any]],
+    statuses: Counter[str],
     total_signals: int,
+    filtered: int,
 ) -> None:
     elapsed = time.monotonic() - started_at
     rate = completed / elapsed if elapsed > 0 else 0
     remaining = (total - completed) / rate if rate > 0 else 0
-    timed_out = sum(1 for result in results if result["status"] == "partial_timeout")
-    filtered = sum(result.get("filtered_signals", 0) for result in results)
+    timed_out = statuses["partial_timeout"]
+    errors = statuses["error"] + statuses["partial_error"]
     percent = (completed / total) * 100 if total else 100
     bar = progress_bar(percent)
     line = (
         f"HeaderProof  {bar}  {completed}/{total} {percent:5.1f}%  "
         f"{rate:.1f}/s  eta {format_duration(remaining)}  "
-        f"confirmed {total_signals}  suppressed {filtered}  timeouts {timed_out}"
+        f"verified {total_signals}  suppressed {filtered}  errors {errors}  timeouts {timed_out}"
     )
     with ALERT_LOCK:
         print(line, file=sys.stderr, flush=True)
@@ -163,7 +164,7 @@ def fp_guard_line(signal: dict[str, Any]) -> str:
         return "FP guard: canary must appear in response header/body from this request; CRLF is separated from plain reflection."
     if "content" in signal_type:
         return "FP guard: plain body reflection is suppressed in strict mode unless it gains cache/header/security impact."
-    return "FP guard: lead is still not report-ready until independent impact validation is done."
+    return "FP guard: technical evidence still requires independent impact validation before submission."
 
 
 def emit_live_alert(url: str, signal: dict[str, Any], args: argparse.Namespace) -> None:
@@ -176,14 +177,14 @@ def emit_live_alert(url: str, signal: dict[str, Any], args: argparse.Namespace) 
     exchange = signal.get("exchange", {})
     response = exchange.get("response", {}) if isinstance(exchange, dict) else {}
     request_data = exchange.get("request", {}) if isinstance(exchange, dict) else {}
-    certainty = signal.get("certainty", {})
+    assessment = signal.get("assessment", {})
     plan = signal.get("verification_plan", {})
     status = response.get("status", "?")
     elapsed = response.get("elapsed_ms", "?")
     method = request_data.get("method", "?")
     request_url = request_data.get("url", url)
-    missing = certainty.get("missing_proof", [])
-    reasons = certainty.get("reasons", [])
+    missing = assessment.get("missing_proof", [])
+    reasons = assessment.get("reasons", [])
     confirmation = plan.get("manual_confirmation", []) if isinstance(plan, dict) else []
 
     lines = [
@@ -192,9 +193,9 @@ def emit_live_alert(url: str, signal: dict[str, Any], args: argparse.Namespace) 
         ui_kv("Type", signal.get("type", "")),
         ui_kv("Target", shorten(url, 220)),
         ui_kv("HTTP", f"{method} {status} in {elapsed}ms"),
-        ui_kv("Evidence state", certainty.get("level", "unknown")),
-        ui_kv("Evidence rank", f"{certainty.get('score', 0)}/100"),
-        ui_kv("Gate", certainty.get("reportability", "unknown")),
+        ui_kv("Evidence state", assessment.get("state", "unknown")),
+        ui_kv("Technical gate", assessment.get("technical_gate", "unknown")),
+        ui_kv("Impact", assessment.get("impact", "unknown")),
         ui_kv("Replay", shorten(request_url, 220)),
         "",
         "Why it is shown",
@@ -211,8 +212,5 @@ def emit_live_alert(url: str, signal: dict[str, Any], args: argparse.Namespace) 
         lines.extend(["", "Next validation"])
         lines.extend(f"  {index}. {shorten(item, 170)}" for index, item in enumerate(confirmation[:4], 1))
     lines.extend(["", fp_guard_line(signal), f"Next: {signal.get('next_step', '')}"])
-    title = (
-        f"CONFIRMED FINDING · {severity.upper()} · "
-        f"{certainty.get('level', 'unknown').upper()}"
-    )
+    title = f"VERIFIED TECHNICAL SIGNAL · {severity.upper()} · {assessment.get('state', 'unknown').upper()}"
     ui_box(title, lines, color=color)

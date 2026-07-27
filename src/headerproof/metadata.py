@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -63,13 +64,14 @@ def scan_config(args: argparse.Namespace) -> dict[str, Any]:
         "follow_redirects": args.follow_redirects,
         "save_body_samples": args.save_body_samples,
         "fp_mode": args.fp_mode,
-        "min_certainty": args.min_certainty,
         "live_alerts": not args.no_live_alerts,
     }
 
 
 def build_metadata(args: argparse.Namespace, input_path: Path, url_count: int) -> dict[str, Any]:
     return {
+        "schema_version": "1.2",
+        "run_id": uuid.uuid4().hex,
         "tool": PRODUCT_NAME,
         "version": VERSION,
         "git_commit": current_git_commit(),

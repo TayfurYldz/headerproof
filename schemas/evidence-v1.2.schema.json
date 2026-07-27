@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TayfurYldz/headerproof/schemas/evidence-v1.2.schema.json",
+  "title": "HeaderProof Evidence Records v1.2",
+  "oneOf": [
+    {"$ref": "#/$defs/result"},
+    {"$ref": "#/$defs/probe"},
+    {"$ref": "#/$defs/finding"},
+    {"$ref": "#/$defs/observation"},
+    {"$ref": "#/$defs/coverage"},
+    {"$ref": "#/$defs/error"}
+  ],
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": ["method", "url", "headers", "client_context"],
+      "properties": {
+        "method": {"type": "string"},
+        "url": {"type": "string", "format": "uri"},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+        "client_context": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "required": [
+        "status",
+        "reason",
+        "error",
+        "elapsed_ms",
+        "headers",
+        "body_len",
+        "body_sample_len",
+        "body_truncated",
+        "body_sha256",
+        "body_sha256_scope"
+      ],
+      "properties": {
+        "status": {"type": ["integer", "null"]},
+        "reason": {"type": "string"},
+        "error": {"type": "string"},
+        "elapsed_ms": {"type": "integer", "minimum": 0},
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {"type": "string"},
+              {"type": "array", "items": {"type": "string"}}
+            ]
+          }
+        },
+        "body_len": {"type": "integer", "minimum": 0},
+        "body_sample_len": {"type": "integer", "minimum": 0},
+        "body_truncated": {"type": "boolean"},
+        "body_sha256": {"type": "string", "pattern": "^$|^[a-f0-9]{64}$"},
+        "body_sha256_scope": {"const": "full_response"},
+        "body_sample": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "exchange": {
+      "type": "object",
+      "required": ["request", "response"],
+      "properties": {
+        "request": {"$ref": "#/$defs/request"},
+        "response": {"$ref": "#/$defs/response"}
+      },
+      "additionalProperties": false
+    },
+    "assessment": {
+      "type": "object",
+      "required": ["state", "technical_gate", "impact", "reasons", "missing_proof", "gate_checks"],
+      "properties": {
+        "state": {"enum": ["observed", "reproduced", "cross_request_confirmed"]},
+        "technical_gate": {"enum": ["passed", "failed"]},
+        "impact": {"const": "unverified"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "missing_proof": {"type": "array", "items": {"type": "string"}},
+        "gate_checks": {"type": "object", "additionalProperties": {"type": "boolean"}}
+      },
+      "additionalProperties": false
+    },
+    "signalBase": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "record_type",
+        "check",
+        "type",
+        "severity",
+        "confidence",
+        "title",
+        "evidence",
+        "assessment",
+        "submission_status"
+      ],
+      "properties": {
+        "schema_version": {"const": "1.2"},
+        "record_type": {"enum": ["finding", "observation"]},
+        "url": {"type": "string", "format": "uri"},
+        "check": {"type": "string"},
+        "type": {"type": "string"},
+        "severity": {"enum": ["critical", "high", "medium", "low", "info"]},
+        "confidence": {"enum": ["high", "medium", "low"]},
+        "title": {"type": "string"},
+        "evidence": {"type": "object"},
+        "exchange": {"$ref": "#/$defs/exchange"},
+        "assessment": {"$ref": "#/$defs/assessment"},
+        "submission_status": {"const": "manual_validation_required"},
+        "next_step": {"type": "string"},
+        "verification_plan": {"type": "object"},
+        "kept": {"type": "boolean"},
+        "filter_mode": {"type": "string"},
+        "filter_reason": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "finding": {
+      "allOf": [
+        {"$ref": "#/$defs/signalBase"},
+        {"properties": {"record_type": {"const": "finding"}}}
+      ]
+    },
+    "observation": {
+      "allOf": [
+        {"$ref": "#/$defs/signalBase"},
+        {
+          "required": ["url", "kept", "filter_mode", "filter_reason"],
+          "properties": {"record_type": {"const": "observation"}}
+        }
+      ]
+    },
+    "probe": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "record_type",
+        "url",
+        "sequence",
+        "probe_id",
+        "detector",
+        "role",
+        "status",
+        "client_context",
+        "exchange",
+        "error"
+      ],
+      "properties": {
+        "schema_version": {"const": "1.2"},
+        "record_type": {"const": "probe"},
+        "url": {"type": "string", "format": "uri"},
+        "sequence": {"type": "integer", "minimum": 1},
+        "probe_id": {"type": "string", "minLength": 1},
+        "detector": {"type": "string", "minLength": 1},
+        "role": {"type": "string", "minLength": 1},
+        "status": {"enum": ["planned", "attempted", "completed", "skipped", "error"]},
+        "client_context": {"type": "string", "minLength": 1},
+        "exchange": {"oneOf": [{"$ref": "#/$defs/exchange"}, {"type": "null"}]},
+        "error": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["record_type", "url", "sequence", "kind", "detector", "probe_id", "role", "state"],
+      "properties": {
+        "record_type": {"const": "coverage"},
+        "url": {"type": "string", "format": "uri"},
+        "sequence": {"type": "integer", "minimum": 1},
+        "kind": {"enum": ["detector", "probe"]},
+        "detector": {"type": "string"},
+        "probe_id": {"type": "string"},
+        "role": {"type": "string"},
+        "state": {"enum": ["planned", "attempted", "completed", "skipped", "error"]},
+        "reason": {"type": "string"},
+        "error": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["record_type", "url", "message"],
+      "properties": {
+        "record_type": {"const": "error"},
+        "url": {"type": "string", "format": "uri"},
+        "error_type": {"type": "string"},
+        "message": {"type": "string"},
+        "probe_id": {"type": "string"},
+        "detector": {"type": "string"},
+        "role": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "record_type",
+        "url",
+        "status",
+        "time_budget",
+        "baseline",
+        "probes",
+        "observations",
+        "signals",
+        "errors",
+        "coverage"
+      ],
+      "properties": {
+        "schema_version": {"const": "1.2"},
+        "record_type": {"const": "result"},
+        "url": {"type": "string", "format": "uri"},
+        "status": {"enum": ["pending", "scanned", "partial_error", "partial_timeout", "error"]},
+        "time_budget": {"type": "object"},
+        "baseline": {"oneOf": [{"$ref": "#/$defs/exchange"}, {"type": "null"}]},
+        "probes": {"type": "array", "items": {"$ref": "#/$defs/probe"}},
+        "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
+        "signals": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+        "errors": {"type": "array"},
+        "coverage": {"type": "array"},
+        "filtered_signals": {"type": "integer", "minimum": 0},
+        "duplicate_signals": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    }
+  }
+}

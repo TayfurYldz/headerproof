@@ -37,6 +37,8 @@ cp "$SRC_DIR/pyproject.toml" "$INSTALL_DIR/pyproject.toml"
 
 mkdir -p "$INSTALL_DIR/src/headerproof"
 cp "$SRC_DIR"/src/headerproof/*.py "$INSTALL_DIR/src/headerproof/"
+mkdir -p "$INSTALL_DIR/schemas"
+cp "$SRC_DIR"/schemas/*.json "$INSTALL_DIR/schemas/"
 
 if [ -d "$SRC_DIR/examples" ]; then
     mkdir -p "$INSTALL_DIR/examples"

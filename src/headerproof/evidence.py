@@ -2,15 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .constants import (
-    CONFIDENCE_ORDER,
-    REPORT_READY_THRESHOLD,
-    SCHEMA_VERSION,
-    SEVERITY_ORDER,
-    SUPPRESSED_BY_STRICT,
-)
-from .models import HttpSnapshot
+from .constants import CONFIDENCE_ORDER, SCHEMA_VERSION, SEVERITY_ORDER, SUPPRESSED_BY_STRICT
+from .models import EvidenceAssessment, EvidenceState, HttpSnapshot, TechnicalGate
 from .transport import snapshot_summary
+
 
 def make_signal(
     check: str,
@@ -25,6 +20,7 @@ def make_signal(
 ) -> dict[str, Any]:
     signal: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
+        "record_type": "finding",
         "check": check,
         "type": signal_type,
         "severity": severity,
@@ -36,23 +32,8 @@ def make_signal(
     if snap:
         signal["exchange"] = snapshot_summary(snap, save_body=save_body)
     apply_detection_assessment(signal)
-    reportability = signal.get("certainty", {}).get("reportability")
-    signal["submission_status"] = "report_ready" if reportability == "report_ready" else "lead_only"
+    signal["submission_status"] = "manual_validation_required"
     return signal
-
-
-def certainty_level(score: int) -> str:
-    if score >= 95:
-        return "confirmed"
-    if score >= 85:
-        return "very_high"
-    if score >= 70:
-        return "high"
-    if score >= 55:
-        return "medium"
-    if score >= 35:
-        return "low"
-    return "noise"
 
 
 def response_status_from_signal(signal: dict[str, Any]) -> int | None:
@@ -163,145 +144,144 @@ def verification_template(signal_type: str) -> dict[str, list[str] | str]:
     }
 
 
-def assess_signal(signal: dict[str, Any]) -> dict[str, Any]:
+def assess_signal(signal: dict[str, Any]) -> EvidenceAssessment:
     signal_type = signal.get("type", "")
     evidence = signal.get("evidence", {})
-    locations = evidence_locations(evidence)
     status = response_status_from_signal(signal)
-    confidence_score = CONFIDENCE_ORDER.get(signal.get("confidence", "low"), 1)
-    score = 20 + (confidence_score * 8)
+    state: EvidenceState = "observed"
+    technical_gate: TechnicalGate = "failed"
     reasons: list[str] = []
     missing: list[str] = []
+    gate_checks: dict[str, bool] = {
+        "response_recorded": status is not None,
+        "transport_succeeded": status is not None,
+    }
 
-    if status and 200 <= status < 400:
-        score += 5
-        reasons.append(f"HTTP {status} response accepted the probe")
-    elif status:
-        missing.append(f"probe returned HTTP {status}, reducing confidence")
+    if status is not None:
+        reasons.append(f"HTTP {status} response was recorded")
+    else:
+        missing.append("probe response was not recorded")
 
     if signal_type == "cors_arbitrary_origin_with_credentials":
-        score = 78
         reasons.extend(["exact Origin reflected", "Access-Control-Allow-Credentials is true"])
-        if evidence.get("unsafe_methods"):
-            score += 3
-            reasons.append("unsafe CORS methods are advertised")
+        gate_checks["exact_origin_reflected"] = True
+        gate_checks["credentials_enabled"] = True
         missing.append("authenticated sensitive body read is not proven by header scan")
     elif signal_type == "cors_arbitrary_origin_reflection":
-        score = 62
         reasons.append("exact Origin reflected in ACAO")
+        gate_checks["exact_origin_reflected"] = True
         missing.append("credentials or sensitive readable data not proven")
     elif signal_type == "cors_wildcard_origin":
-        score = 28
         reasons.append("wildcard ACAO observed")
+        gate_checks["wildcard_origin_observed"] = True
         missing.append("wildcard CORS alone is normally not reportable")
     elif signal_type == "cors_cache_poisoning_candidate":
-        score = 64
         reasons.extend(["reflected Origin on cacheable response", "Vary: Origin missing"])
+        gate_checks["cache_candidate"] = True
         missing.append("second-client poisoned response not proven")
     elif signal_type == "csrf_cookie_samesite_missing":
-        score = 42 if evidence.get("likely_auth_cookie") else 20
         reasons.append("SameSite missing on Set-Cookie")
+        gate_checks["likely_auth_cookie"] = bool(evidence.get("likely_auth_cookie"))
         missing.append("no cross-site state-changing request or read-back proof")
     elif signal_type == "csrf_cookie_cross_site_auth":
-        score = 48
         reasons.append("likely auth cookie permits cross-site delivery")
+        gate_checks["likely_auth_cookie"] = True
         missing.append("CSRF token/origin enforcement and state change not tested")
     elif signal_type == "csrf_cookie_auth_unsafe_methods_exposed":
-        score = 55
         reasons.extend(["likely auth cookie present", "unsafe methods advertised"])
+        gate_checks["unsafe_methods_advertised"] = True
         missing.append("browser-delivered exploit and separate read-back not proven")
     elif signal_type == "cookie_samesite_none_without_secure":
-        score = 25
         reasons.append("cookie attribute hardening issue")
+        gate_checks["cookie_attribute_observed"] = True
         missing.append("no exploitable session or CSRF impact proven")
     elif signal_type == "header_poisoning_candidate":
-        score = 82
         reasons.append("canary reached security-relevant response header")
+        gate_checks["security_header_reflection"] = True
         missing.append("victim-observable impact not independently proven")
     elif signal_type == "header_reflection_candidate":
-        score = 48
         reasons.append("canary reached response header")
+        gate_checks["header_reflection"] = True
         missing.append("plain reflection does not prove header control or splitting")
     elif signal_type == "header_based_content_spoofing":
-        score = 42
         reasons.append("header canary reached textual response body")
+        gate_checks["body_reflection"] = True
         missing.append("trusted victim-visible spoofing or cache impact not proven")
     elif signal_type == "unkeyed_header_cache_poisoning_candidate":
-        score = 66
         reasons.extend(["header canary reflected", "response has cache indicators"])
+        gate_checks["cache_candidate"] = True
         missing.append("clean second-client cached response not proven")
-    elif signal_type == "cache_poisoning_confirmed_on_cache_buster_url":
+    elif signal_type in {
+        "cache_poisoning_cross_request_reproduction",
+        "cache_poisoning_shared_cache_confirmed",
+    }:
+        state = "reproduced"
+        required_checks = evidence.get("state_machine_checks", {})
+        if isinstance(required_checks, dict):
+            gate_checks.update({str(key): bool(value) for key, value in required_checks.items()})
         if evidence.get("shared_cache_confirmed"):
-            score = 97
+            state = "cross_request_confirmed"
+            technical_gate = "passed"
             reasons.extend(
                 [
                     "poison request contained canary",
                     "clean follow-up response contained canary",
-                    "clean follow-up response included a shared-cache hit marker",
+                    "all four cache-state requests completed in isolated client contexts",
+                    "clean victim response included shared-cache progression evidence",
                 ]
             )
-            missing.append("repeat from an independent network/client before final report submission")
+            missing.append("real victim impact remains unverified; validate on an authorized low-traffic path")
         else:
-            score = 88
             reasons.extend(["poison request contained canary", "clean follow-up response contained canary"])
-            missing.append("shared-cache HIT/Age proof was absent; rule out origin-side state before reporting")
+            missing.append("the complete shared-cache state-machine gate did not pass")
     elif signal_type == "query_parameter_content_reflection":
-        score = 32
         reasons.append("query canary reflected in textual body")
+        gate_checks["body_reflection"] = True
         missing.append("plain reflection lacks trusted-context, cache, or script impact")
     elif signal_type == "query_parameter_header_reflection":
-        score = 58
         reasons.append("query canary reached response header")
+        gate_checks["header_reflection"] = True
         missing.append("arbitrary header setting or response splitting not proven")
     elif signal_type == "response_splitting_crlf_candidate":
-        if evidence.get("injected_header_seen"):
-            score = 98
+        exact_header = bool(evidence.get("injected_header_seen"))
+        gate_checks["exact_canary_parsed_as_header"] = exact_header
+        if exact_header and status is not None:
+            state = "reproduced"
+            technical_gate = "passed"
             reasons.append("CRLF probe produced a parsed response header")
+            missing.append("real victim impact remains unverified")
         else:
-            score = 60
             reasons.append("CRLF canary reflected but parsed injected header not observed")
             missing.append("parsed arbitrary header not proven")
 
-    score = max(0, min(100, score))
-    reportability = (
-        "report_ready"
-        if score >= REPORT_READY_THRESHOLD
-        else "probable_lead"
-        if score >= 85
-        else "needs_manual_proof"
-        if score >= 70
-        else "manual_review"
-        if score >= 55
-        else "suppress_by_default"
-    )
     return {
-        "score": score,
-        "level": certainty_level(score),
-        "reportability": reportability,
+        "state": state,
+        "technical_gate": technical_gate,
+        "impact": "unverified",
         "reasons": reasons,
         "missing_proof": missing,
+        "gate_checks": gate_checks,
     }
 
 
 def apply_detection_assessment(signal: dict[str, Any]) -> None:
-    signal["certainty"] = assess_signal(signal)
+    signal["assessment"] = assess_signal(signal)
     signal["verification_plan"] = verification_template(signal.get("type", ""))
 
 
-def signal_passes_fp_filter(signal: dict[str, Any], fp_mode: str, min_certainty: int) -> bool:
+def signal_passes_fp_filter(signal: dict[str, Any], fp_mode: str) -> bool:
     if fp_mode == "all":
         return True
 
     signal_type = signal.get("type", "")
     evidence = signal.get("evidence", {})
-    severity_score = SEVERITY_ORDER.get(signal.get("severity", "info"), 0)
-    confidence_score = CONFIDENCE_ORDER.get(signal.get("confidence", "low"), 0)
-    certainty_score = signal.get("certainty", {}).get("score", 0)
+    severity_level = SEVERITY_ORDER.get(signal.get("severity", "info"), 0)
+    confidence_level = CONFIDENCE_ORDER.get(signal.get("confidence", "low"), 0)
+    assessment = signal.get("assessment", {})
 
-    if certainty_score < min_certainty:
+    if fp_mode == "strict" and assessment.get("technical_gate") != "passed":
         return False
-
-    if fp_mode == "strict" and signal.get("certainty", {}).get("reportability") != "report_ready":
+    if fp_mode == "balanced" and assessment.get("state") == "observed":
         return False
 
     if signal_type == "csrf_cookie_samesite_missing" and not evidence.get("likely_auth_cookie"):
@@ -314,9 +294,9 @@ def signal_passes_fp_filter(signal: dict[str, Any], fp_mode: str, min_certainty:
     if fp_mode == "strict":
         if signal_type in SUPPRESSED_BY_STRICT:
             return False
-        if severity_score <= SEVERITY_ORDER["low"]:
+        if severity_level <= SEVERITY_ORDER["low"]:
             return False
-        if confidence_score < CONFIDENCE_ORDER["medium"]:
+        if confidence_level < CONFIDENCE_ORDER["medium"]:
             return False
 
     return True

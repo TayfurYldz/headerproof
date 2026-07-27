@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.1
+
+- Fixed the refactor regression that serialized every baseline and probe exchange as `null`.
+- Streamed response bodies while calculating full-response length and SHA-256; added explicit sample length and truncation fields.
+- Required every cache confirmation stage to complete without transport errors, with the expected cache-key relationship, isolated client contexts, clean requests, a fresh control, and shared-cache progression.
+- Split cache results into cross-request reproduction and shared-cache-confirmed signal types.
+- Propagated every failed request into structured probe/error records and marked affected targets `partial_error`; all-failed batches now exit nonzero.
+- Removed arbitrary numeric certainty ranks and `CONFIRMED FINDING` wording. Evidence now uses `observed`, `reproduced`, and `cross_request_confirmed`, while impact remains `unverified`.
+- Added typed evidence models, JSON Schema v1.2, detector/probe coverage records, incremental JSONL writes, durable checkpoints, SQLite input deduplication, collision-resistant run directories, and run IDs.
+- Added independent origin/cache-proxy tests, a 13-case cache proof-gate mutation matrix, schema-contract tests, and full body/exchange/error regressions.
+- Raised detector and evidence branch coverage to 99% with a CI floor of 95%.
+- Added Ruff and Mypy CI gates, repaired the Makefile, and added an installed-wheel real-scan smoke test.
+- Changed package maturity from Beta to developer Alpha until pooled transport and explicit resume support land.
+- Changed release automation so one build is tested, attested, uploaded, and published without rebuilding artifacts.
+
 ## 1.3.0
 
 - Adopted a real `src/headerproof/` package layout with separate `models`, `transport`, `input`, `engine`, `detectors`, `evidence`, `output`, `metadata`, and `ui` modules.

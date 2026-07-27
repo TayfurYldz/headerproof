@@ -7,6 +7,7 @@ from .constants import CACHEABLE_STATUSES, LIKELY_AUTH_COOKIE, TEXTUAL_CONTENT, 
 from .evidence import make_signal
 from .models import HttpSnapshot
 
+
 def header_join(snap: HttpSnapshot, name: str) -> str:
     return ", ".join(snap.values(name))
 
@@ -106,6 +107,17 @@ def cache_hit_progressed(
     victim_age = header_int(victim, "age")
     previous_age = max(header_int(clean_before, "age"), header_int(poison, "age"))
     return victim_age > 0 and victim_age > previous_age
+
+
+def snapshot_completed(snap: HttpSnapshot | None) -> bool:
+    return snap is not None and not snap.error and snap.status is not None
+
+
+def request_contains_canary(snap: HttpSnapshot | None, canary: str) -> bool:
+    if snap is None:
+        return False
+    needle = canary.lower()
+    return any(needle in value.lower() for value in snap.request_headers.values())
 
 
 def is_textual_response(snap: HttpSnapshot) -> bool:
@@ -453,21 +465,64 @@ def analyze_header_probe(
     control_locations = canary_locations(control, canary) if control else []
     clean_before_indicators = cache_indicators(clean_before) if clean_before else []
     control_indicators = cache_indicators(control) if control else []
+    snapshots = (clean_before, probe, victim, control)
+    completed_stages = all(snapshot_completed(item) for item in snapshots)
+    cache_key_relationship = bool(
+        clean_before
+        and victim
+        and control
+        and clean_before.request_url == probe.request_url == victim.request_url
+        and control.request_url != probe.request_url
+    )
+    client_contexts = [item.client_context for item in snapshots if item is not None]
+    isolated_client_contexts = len(client_contexts) == 4 and len(set(client_contexts)) == 4
+    status_consistent = bool(
+        clean_before
+        and victim
+        and control
+        and clean_before.status == probe.status == victim.status == control.status
+    )
+    state_machine_checks = {
+        "clean_before_completed": snapshot_completed(clean_before),
+        "poison_completed": snapshot_completed(probe),
+        "clean_victim_completed": snapshot_completed(victim),
+        "fresh_control_completed": snapshot_completed(control),
+        "cache_key_relationship_valid": cache_key_relationship,
+        "isolated_client_contexts": isolated_client_contexts,
+        "response_status_consistent": status_consistent,
+        "clean_before_has_no_canary": not clean_before_locations,
+        "poison_response_contains_canary": bool(locations),
+        "clean_victim_contains_canary": bool(victim_locations),
+        "fresh_control_has_no_canary": not control_locations,
+        "poison_request_contains_canary": request_contains_canary(probe, canary),
+        "clean_before_request_has_no_canary": not request_contains_canary(clean_before, canary),
+        "clean_victim_request_has_no_canary": not request_contains_canary(victim, canary),
+        "fresh_control_request_has_no_canary": not request_contains_canary(control, canary),
+        "shared_cache_hit_marker_present": bool(shared_markers),
+        "cache_hit_progressed": cache_hit_progressed(clean_before, probe, victim),
+    }
     shared_confirmed = (
-        bool(victim_locations)
-        and not clean_before_locations
-        and not control_locations
-        and bool(shared_markers)
-        and cache_hit_progressed(clean_before, probe, victim)
+        completed_stages
+        and all(state_machine_checks.values())
     )
     if victim_locations and (cacheable or victim_indicators):
+        signal_type = (
+            "cache_poisoning_shared_cache_confirmed"
+            if shared_confirmed
+            else "cache_poisoning_cross_request_reproduction"
+        )
+        title = (
+            "Shared cache served the poisoned canary to a clean client"
+            if shared_confirmed
+            else "Clean follow-up reproduced the poison, but shared-cache proof is incomplete"
+        )
         signals.append(
             make_signal(
                 "cache-poisoning",
-                "cache_poisoning_confirmed_on_cache_buster_url",
+                signal_type,
                 "high",
                 "high",
-                "Clean follow-up request reproduced the poisoned canary",
+                title,
                 {
                     "probe_id": probe_id,
                     "canary": canary,
@@ -477,7 +532,7 @@ def analyze_header_probe(
                     "clean_before_locations": clean_before_locations,
                     "fresh_key_control_locations": control_locations,
                     "clean_follow_up": True,
-                    "fresh_key_control": bool(control),
+                    "fresh_key_control": snapshot_completed(control),
                     "cacheable_probe": cacheable,
                     "cache_indicators": sorted(
                         set(indicators + victim_indicators + clean_before_indicators + control_indicators)
@@ -487,6 +542,7 @@ def analyze_header_probe(
                     "fresh_key_control_cache_indicators": control_indicators,
                     "shared_cache_confirmed": shared_confirmed,
                     "shared_cache_hit_markers": shared_markers,
+                    "state_machine_checks": state_machine_checks,
                 },
                 victim,
                 "Repeat on an authorized low-traffic path and prove cross-client reachability before reporting.",

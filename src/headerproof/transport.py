@@ -5,11 +5,16 @@ import re
 import socket
 import ssl
 import time
-from typing import Any
+from typing import Any, Protocol
 from urllib import error, request
 
 from .constants import VERSION
-from .models import HttpSnapshot
+from .models import ExchangeEvidence, HttpSnapshot
+
+
+class ReadableBody(Protocol):
+    def read(self, size: int = -1) -> bytes: ...
+
 
 class NoRedirectHandler(request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
@@ -62,6 +67,21 @@ def decode_body(raw: bytes, content_type: str) -> str:
         return raw.decode("utf-8", errors="replace")
 
 
+def consume_body(stream: ReadableBody, sample_limit: int) -> tuple[bytes, int, str, bool]:
+    digest = hashlib.sha256()
+    sample = bytearray()
+    total = 0
+    while True:
+        chunk = stream.read(64 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+        total += len(chunk)
+        if len(sample) < sample_limit:
+            sample.extend(chunk[: sample_limit - len(sample)])
+    return bytes(sample), total, digest.hexdigest(), total > len(sample)
+
+
 class HttpClient:
     def __init__(self, timeout: float, max_body: int, follow_redirects: bool, delay: float) -> None:
         self.timeout = timeout
@@ -78,6 +98,7 @@ class HttpClient:
         method: str = "GET",
         headers: dict[str, str] | None = None,
         timeout: float | None = None,
+        client_context: str = "default",
     ) -> HttpSnapshot:
         request_headers = {
             "User-Agent": f"headerproof/{VERSION}",
@@ -86,7 +107,7 @@ class HttpClient:
             "Connection": "close",
         }
         request_headers.update(headers or {})
-        snap = HttpSnapshot(method, url, request_headers)
+        snap = HttpSnapshot(method, url, request_headers, client_context=client_context)
         req = request.Request(url, headers=request_headers, method=method)
         start = time.monotonic()
         effective_timeout = self.timeout if timeout is None else max(0.05, timeout)
@@ -94,31 +115,37 @@ class HttpClient:
             time.sleep(min(self.delay, effective_timeout))
         try:
             with self.opener.open(req, timeout=effective_timeout) as resp:
-                raw = resp.read(self.max_body + 1)
+                raw, body_len, body_sha256, body_truncated = consume_body(resp, self.max_body)
                 snap.status = resp.status
                 snap.reason = resp.reason
                 snap.headers = headers_from_message(resp.headers)
         except error.HTTPError as exc:
-            raw = exc.read(self.max_body + 1)
+            raw, body_len, body_sha256, body_truncated = consume_body(exc, self.max_body)
             snap.status = exc.code
             snap.reason = exc.reason
             snap.headers = headers_from_message(exc.headers)
         except (error.URLError, TimeoutError, socket.timeout, ssl.SSLError, OSError) as exc:
             snap.error = f"{type(exc).__name__}: {exc}"
             raw = b""
+            body_len = 0
+            body_sha256 = ""
+            body_truncated = False
         snap.elapsed_ms = int((time.monotonic() - start) * 1000)
-        snap.body_len = len(raw)
-        snap.body_sha256 = hashlib.sha256(raw).hexdigest() if raw else ""
-        snap.body_sample = decode_body(raw[: self.max_body], snap.first("content-type")) if raw else ""
+        snap.body_len = body_len
+        snap.body_sample_len = len(raw)
+        snap.body_truncated = body_truncated
+        snap.body_sha256 = body_sha256
+        snap.body_sample = decode_body(raw, snap.first("content-type")) if raw else ""
         return snap
 
 
-def snapshot_summary(snap: HttpSnapshot, save_body: bool = False) -> dict[str, Any]:
-    data: dict[str, Any] = {
+def snapshot_summary(snap: HttpSnapshot, save_body: bool = False) -> ExchangeEvidence:
+    data: ExchangeEvidence = {
         "request": {
             "method": snap.request_method,
             "url": snap.request_url,
             "headers": snap.request_headers,
+            "client_context": snap.client_context,
         },
         "response": {
             "status": snap.status,
@@ -127,8 +154,12 @@ def snapshot_summary(snap: HttpSnapshot, save_body: bool = False) -> dict[str, A
             "elapsed_ms": snap.elapsed_ms,
             "headers": serialise_headers(snap.headers),
             "body_len": snap.body_len,
+            "body_sample_len": snap.body_sample_len,
+            "body_truncated": snap.body_truncated,
             "body_sha256": snap.body_sha256,
+            "body_sha256_scope": "full_response",
         },
     }
     if save_body:
         data["response"]["body_sample"] = snap.body_sample
+    return data

@@ -16,9 +16,8 @@ CACHEABLE_STATUSES = {200, 203, 204, 206, 300, 301, 302, 404, 410}
 SEVERITY_ORDER = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
 CONFIDENCE_ORDER = {"high": 3, "medium": 2, "low": 1}
 PRODUCT_NAME = "HeaderProof"
-VERSION = "1.3.0"
-SCHEMA_VERSION = "1.1"
-REPORT_READY_THRESHOLD = 95
+VERSION = "1.3.1"
+SCHEMA_VERSION = "1.2"
 BANNER = r"""
     __  __               __          ____                   __
    / / / /__  ____ _____/ /__  _____/ __ \________  ____  / /
@@ -26,7 +25,6 @@ BANNER = r"""
  / __  /  __/ /_/ / /_/ /  __/ /  / ____/ /  /  __/ /_/ /_/
 /_/ /_/\___/\__,_/\__,_/\___/_/  /_/   /_/   \___/\____(_)
 """
-FP_CERTAINTY_DEFAULTS = {"strict": REPORT_READY_THRESHOLD, "balanced": 70, "all": 0}
 PROFILE_DEFAULTS = {
     "fast": {
         "timeout": 2.0,

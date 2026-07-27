@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import Iterator
 from urllib import parse
+
 
 def normalise_url(raw: str) -> str | None:
     raw = raw.strip()
@@ -44,21 +46,47 @@ def url_fingerprint(url: str) -> int:
     return int.from_bytes(hashlib.blake2b(url.encode("utf-8"), digest_size=8).digest(), "big")
 
 
-def iter_urls(path: Path, max_urls: int | None = None) -> Iterator[str]:
-    seen: set[int] = set()
+def iter_urls(
+    path: Path,
+    max_urls: int | None = None,
+    dedup_db: Path | None = None,
+) -> Iterator[str]:
+    seen: set[int] | None = set() if dedup_db is None else None
+    connection: sqlite3.Connection | None = None
+    if dedup_db is not None:
+        dedup_db.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(dedup_db)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("CREATE TABLE IF NOT EXISTS seen_urls (url TEXT PRIMARY KEY)")
+
     count = 0
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        url = normalise_url(line)
-        if not url:
-            continue
-        fingerprint = url_fingerprint(url)
-        if fingerprint in seen:
-            continue
-        seen.add(fingerprint)
-        yield url
-        count += 1
-        if max_urls and count >= max_urls:
-            break
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                url = normalise_url(line)
+                if not url:
+                    continue
+                if connection is not None:
+                    cursor = connection.execute("INSERT OR IGNORE INTO seen_urls(url) VALUES (?)", (url,))
+                    if cursor.rowcount == 0:
+                        continue
+                    if count % 1000 == 0:
+                        connection.commit()
+                else:
+                    assert seen is not None
+                    fingerprint = url_fingerprint(url)
+                    if fingerprint in seen:
+                        continue
+                    seen.add(fingerprint)
+                yield url
+                count += 1
+                if max_urls and count >= max_urls:
+                    break
+    finally:
+        if connection is not None:
+            connection.commit()
+            connection.close()
 
 
 def load_urls(path: Path, max_urls: int | None = None) -> list[str]:
