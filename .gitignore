@@ -12,5 +12,27 @@ evidence/
 *.tar.gz
 *.zip
 .env
+.env.*
+!.env.example
 .venv/
 venv/
+
+# Local IDE / agent workspaces
+.idea/
+.vscode/
+.claude/
+.codex/
+.agents/
+.antigravity/
+.DS_Store
+
+# Local credentials / key material
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local scanner state
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
